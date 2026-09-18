@@ -444,7 +444,9 @@ if (mapObject.contentDocument?.querySelector("[data-region-id]")) bindMap();
 
 validateSimulationConfig();
 setTheme(getTheme(), false);
-try { setThreatsCollapsed(localStorage.getItem(COLLAPSE_KEY) === "true"); } catch (_) {}
+let savedThreatsCollapsed = false;
+try { savedThreatsCollapsed = localStorage.getItem(COLLAPSE_KEY) === "true"; } catch (_) {}
+setThreatsCollapsed(window.matchMedia("(max-width: 640px)").matches || savedThreatsCollapsed);
 render();
 setInterval(updateClock, 1000);
 setInterval(render, 30_000);
