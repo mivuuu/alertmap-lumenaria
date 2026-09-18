@@ -260,6 +260,46 @@ button:focus-visible, a:focus-visible { outline: 3px solid var(--focus); outline
   .map-stage { height: 64dvh; min-height: 430px; max-height: 590px; padding-bottom: 42px; }
   .map-wrap { width: min(100%, calc((64dvh - 44px) * 1.282)); }
   .legend { left: 10px; right: auto; bottom: 18px; max-width: calc(100% - 20px); grid-template-columns: max-content; gap: 7px; padding: 10px 11px; font-size: 12px; }
+  .threats-panel {
+    position: fixed;
+    inset: auto 10px max(10px, env(safe-area-inset-bottom));
+    width: auto;
+    max-height: min(68dvh, 560px);
+    margin: 0;
+    border-radius: 16px;
+    box-shadow: 0 14px 42px rgb(0 0 0 / .34), 0 0 0 1px color-mix(in srgb, var(--line) 65%, transparent);
+    z-index: 50;
+  }
+  .threats-panel:not(.collapsed) .threat-list { max-height: calc(68dvh - 68px); }
+  .threats-panel.collapsed {
+    left: auto;
+    right: 12px;
+    bottom: max(12px, env(safe-area-inset-bottom));
+    width: auto;
+    background: transparent;
+    box-shadow: none;
+  }
+  .threats-panel.collapsed .threats-heading {
+    min-height: 0;
+    padding: 0;
+    border: 0;
+  }
+  .threats-panel.collapsed .threats-heading > div { display: none; }
+  .threats-panel.collapsed .collapse-button {
+    min-width: 0;
+    min-height: 48px;
+    padding: 0 17px;
+    gap: 10px;
+    border-radius: 999px;
+    background: var(--panel);
+    box-shadow: 0 8px 28px rgb(0 0 0 / .32), 0 0 0 1px color-mix(in srgb, var(--line) 72%, transparent);
+    color: var(--text);
+  }
+  .threats-panel.collapsed .collapse-button::before {
+    content: "Угрозы";
+    font-size: 14px;
+    font-weight: 600;
+  }
   .collapse-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
   .collapse-button { min-width: 44px; min-height: 44px; justify-content: center; }
   .statistics-grid { grid-template-columns: 1fr; }
