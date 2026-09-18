@@ -242,7 +242,7 @@ button:focus-visible, a:focus-visible { outline: 3px solid var(--focus); outline
   .map-wrap { width: min(calc(100vw - 4px), calc((66dvh - 34px) * 1.282)); }
   .legend { left: 14px; bottom: 18px; padding: 11px 13px; gap: 7px; font-size: 13px; }
   .legend-swatch { width: 10px; height: 10px; }
-  .threats-panel { position: relative; top: auto; right: auto; width: 100%; max-height: none; margin: -12px 0 0; border-radius: 16px 16px 0 0; box-shadow: 0 -1px 0 color-mix(in srgb, var(--line) 72%, transparent); }
+  .threats-panel { position: relative; top: auto; right: auto; width: 100%; max-height: none; margin: 0; border-radius: 16px 16px 0 0; box-shadow: 0 -1px 0 color-mix(in srgb, var(--line) 72%, transparent); }
   .threats-panel.collapsed { width: 100%; }
   .threat-list { max-height: 50dvh; }
   .threats-heading { min-height: 68px; padding-inline: 18px 12px; }
