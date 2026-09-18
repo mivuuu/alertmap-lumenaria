@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ru" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#101214">
+  <meta name="description" content="Карта тревог вымышленной страны Люменария">
+  <title>Карта тревог Люменарии</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <a class="brand" href="#map" aria-label="Карта тревог Люменарии">
+      <span class="brand-name">Люменария</span>
+      <span class="brand-subtitle">Карта тревог</span>
+    </a>
+
+    <div class="header-status" aria-live="polite">
+      <time id="current-time" aria-label="Текущие дата и время"></time>
+    </div>
+
+    <nav class="header-actions" aria-label="Настройки отображения">
+      <button class="header-button" id="statistics-button" type="button">Статистика</button>
+      <button class="header-button" id="theme-toggle" type="button" aria-pressed="false">Светлая тема</button>
+    </nav>
+  </header>
+
+  <main class="app-main" id="map">
+    <section class="map-stage" aria-label="Карта тревог Люменарии">
+      <div class="map-wrap" id="map-wrap">
+        <object id="alarm-map" data="assets/lumenaria-map.svg" type="image/svg+xml" aria-label="Карта 34 регионов Люменарии"></object>
+      </div>
+
+      <div class="legend" aria-label="Обозначения на карте">
+        <span><i class="legend-swatch red" aria-hidden="true"></i>Воздушная тревога (красный уровень)</span>
+        <span><i class="legend-swatch yellow" aria-hidden="true"></i>Воздушная тревога (жёлтый уровень)</span>
+        <span><i class="legend-swatch clear" aria-hidden="true"></i>Тревог нет</span>
+      </div>
+    </section>
+
+    <aside class="threats-panel" id="threats-panel" aria-labelledby="threats-title">
+      <div class="threats-heading">
+        <div>
+          <h1 id="threats-title">Угрозы</h1>
+          <p id="threats-summary">Активные тревоги</p>
+        </div>
+        <button class="collapse-button" id="threats-toggle" type="button" aria-expanded="true" aria-controls="threats-content">
+          <span class="collapse-label">Свернуть</span>
+          <span class="chevron" aria-hidden="true"></span>
+        </button>
+      </div>
+      <div class="threats-content" id="threats-content">
+        <div class="threat-list" id="threat-list"></div>
+      </div>
+    </aside>
+  </main>
+
+  <dialog class="statistics-dialog" id="statistics-dialog" aria-labelledby="statistics-title">
+    <div class="dialog-heading">
+      <div>
+        <p class="dialog-kicker">Текущая обстановка</p>
+        <h2 id="statistics-title">Статистика</h2>
+      </div>
+      <button class="dialog-close" id="statistics-close" type="button" aria-label="Закрыть статистику">Закрыть</button>
+    </div>
+    <div class="statistics-grid" id="statistics-grid"></div>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
