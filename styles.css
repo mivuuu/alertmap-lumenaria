@@ -251,15 +251,17 @@ button:focus-visible, a:focus-visible { outline: 3px solid var(--focus); outline
 
 @media (max-width: 640px) {
   :root { --header-height: 60px; }
+  body { height: 100dvh; overflow: hidden; }
   .app-header { padding-inline: 12px; }
   .brand { display: block; line-height: 1.05; }
   .brand-name { display: block; font-size: 19px; }
   .brand-subtitle { display: none; }
   .header-actions { gap: 0; }
   .header-button { min-height: 44px; padding-inline: 7px; font-size: 11px; }
-  .map-stage { height: 64dvh; min-height: 430px; max-height: 590px; padding-bottom: 42px; }
-  .map-wrap { width: min(100%, calc((64dvh - 44px) * 1.282)); }
-  .legend { left: 10px; right: auto; bottom: 18px; max-width: calc(100% - 20px); grid-template-columns: max-content; gap: 7px; padding: 10px 11px; font-size: 12px; }
+  .app-main { height: calc(100dvh - var(--header-height)); min-height: 0; overflow: hidden; }
+  .map-stage { position: absolute; inset: 0; height: auto; min-height: 0; max-height: none; padding: 0 2px; }
+  .map-wrap { width: min(calc(100vw - 4px), calc((100dvh - var(--header-height) - 96px) * 1.282)); }
+  .legend { left: 10px; right: auto; bottom: max(72px, calc(env(safe-area-inset-bottom) + 72px)); max-width: calc(100% - 20px); grid-template-columns: max-content; gap: 7px; padding: 10px 11px; font-size: 12px; }
   .threats-panel {
     position: fixed;
     inset: auto 10px max(10px, env(safe-area-inset-bottom));
