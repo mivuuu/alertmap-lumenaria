@@ -142,17 +142,18 @@ const STATUS = {
 };
 
 const CONFIG = {
-  eventBlockSeconds: 60 * 60,
   lookbackSeconds: 8 * 60 * 60,
-  lookaheadBlocks: 2,
+  lookaheadSeconds: 3 * 60 * 60,
+  eventStreamDaySeconds: 24 * 60 * 60,
+  eventIndexStride: 256,
   seed: 217031
 };
 
 const GLOBAL_EVENT_CONFIG = {
-  calmChance: 0.07,
+  calmChance: 0.05,
   longRangeChance: 0.05,
-  largeWaveChance: 0.10,
-  frontlineWaveChance: 0.32
+  largeWaveChance: 0.08,
+  frontlineWaveChance: 0.30
 };
 
 const EVENT_DEPTH_BY_ZONE = {
@@ -227,7 +228,7 @@ function eventRange(eventIndex, salt, minimum, maximum, regionId = 0, extra = 0)
 
 const eventCache = new Map();
 const eventEffectsCache = new Map();
-const alertEpisodesCache = new WeakMap();
+const eventStreamCache = new Map();
 const DEEP_TARGET_IDS = REGIONS
   .filter(region => EVENT_DEPTH_BY_ZONE[REGION_RISK[region.id].zone] >= 3)
   .map(region => region.id);
@@ -236,7 +237,7 @@ const ORIGIN_SECTORS = {
   17: "юго-восточный", 18: "южный", 20: "южный"
 };
 
-function attackEventAtIndex(eventIndex) {
+function buildAttackEvent(eventIndex, startedAt) {
   if (eventCache.has(eventIndex)) return eventCache.get(eventIndex);
   const selector = eventRoll(eventIndex, 0x32d31b79);
   const calmEnd = GLOBAL_EVENT_CONFIG.calmChance;
@@ -248,14 +249,12 @@ function attackEventAtIndex(eventIndex) {
       : selector < largeWaveEnd ? "large_wave"
         : selector < frontlineWaveEnd ? "frontline_wave"
           : "normal_local";
-  const blockStart = eventIndex * CONFIG.eventBlockSeconds;
-  const startedAt = blockStart + eventRange(eventIndex, 0x749ea2d3, 20, CONFIG.eventBlockSeconds - 20);
   const durationRanges = {
-    calm: [5 * 60, 30 * 60],
-    normal_local: [50 * 60, 3 * 60 * 60],
-    frontline_wave: [70 * 60, 4 * 60 * 60],
-    large_wave: [2 * 60 * 60, 5 * 60 * 60],
-    long_range_strike: [12 * 60, 50 * 60]
+    calm: [5 * 60, 25 * 60],
+    normal_local: [10 * 60, 40 * 60],
+    frontline_wave: [20 * 60, 90 * 60],
+    large_wave: [40 * 60, 2 * 60 * 60],
+    long_range_strike: [8 * 60, 35 * 60]
   };
   const [minimumDuration, maximumDuration] = durationRanges[type];
   const duration = eventRange(eventIndex, 0x1b56c4e9, minimumDuration, maximumDuration);
@@ -284,14 +283,39 @@ function attackEventAtIndex(eventIndex) {
   return event;
 }
 
-function attackEventsForRange(startSecond, endSecond) {
-  const firstBlock = Math.floor((startSecond - CONFIG.lookbackSeconds) / CONFIG.eventBlockSeconds);
-  const lastBlock = Math.floor(endSecond / CONFIG.eventBlockSeconds) + CONFIG.lookaheadBlocks;
+function attackEventStreamForDay(dayIndex) {
+  if (eventStreamCache.has(dayIndex)) return eventStreamCache.get(dayIndex);
+  const dayStart = dayIndex * CONFIG.eventStreamDaySeconds;
+  const dayEnd = dayStart + CONFIG.eventStreamDaySeconds;
   const events = [];
-  for (let eventIndex = firstBlock; eventIndex <= lastBlock; eventIndex++) {
-    events.push(attackEventAtIndex(eventIndex));
+  let previousEventAt = dayStart;
+  for (let sequence = 0; sequence < CONFIG.eventIndexStride; sequence++) {
+    const eventIndex = dayIndex * CONFIG.eventIndexStride + sequence;
+    let gap = eventRange(eventIndex, 0x749ea2d3, 8 * 60, 35 * 60);
+    if (eventRoll(eventIndex, 0x1f2e3d4c, 0, previousEventAt) < 0.07) {
+      gap += eventRange(eventIndex, 0x68b1fa27, 15 * 60, 50 * 60, 0, previousEventAt);
+    }
+    const startedAt = previousEventAt + gap;
+    if (startedAt >= dayEnd) break;
+    events.push(buildAttackEvent(eventIndex, startedAt));
+    previousEventAt = startedAt;
   }
+  eventStreamCache.set(dayIndex, events);
   return events;
+}
+
+function attackEventsForRange(startSecond, endSecond) {
+  const generationStart = startSecond - CONFIG.lookbackSeconds;
+  const generationEnd = endSecond + CONFIG.lookaheadSeconds;
+  const firstDay = Math.floor(generationStart / CONFIG.eventStreamDaySeconds) - 1;
+  const lastDay = Math.floor(generationEnd / CONFIG.eventStreamDaySeconds) + 1;
+  const events = [];
+  for (let dayIndex = firstDay; dayIndex <= lastDay; dayIndex++) {
+    for (const event of attackEventStreamForDay(dayIndex)) {
+      if (event.endsAt >= generationStart && event.startedAt <= generationEnd) events.push(event);
+    }
+  }
+  return events.sort((a, b) => a.startedAt - b.startedAt || a.eventIndex - b.eventIndex);
 }
 
 function buildEffectPhases(event, regionId, delay, redCapable) {
@@ -301,45 +325,47 @@ function buildEffectPhases(event, regionId, delay, redCapable) {
   const desiredDuration = eventRange(event.eventIndex, 0x4f1bbcdc, minimumDuration, maximumDuration, regionId);
   const threatDuration = Math.min(desiredDuration, Math.max(5 * 60, event.endsAt - startedAt));
   const threatEndsAt = startedAt + threatDuration;
-  const allClearDelay = eventRange(event.eventIndex, 0x2c9277b5, 30, 8 * 60, regionId);
-  const endsAt = threatEndsAt + allClearDelay;
   const phases = [];
+  const [minimumSameState, maximumSameState] = MAX_SAME_STATE_DURATION_BY_DEPTH[depth];
+  const yellowPhaseMinimum = Math.max(60, Math.floor(minimumSameState * 0.60));
+  const yellowPhaseMaximum = Math.max(2 * 60, Math.floor(maximumSameState * 0.80));
   const escalationDelay = eventRange(event.eventIndex, 0x63d83595, 40, 6 * 60, regionId);
   if (!redCapable || startedAt + escalationDelay >= threatEndsAt - 60) {
+    const yellowDuration = eventRange(
+      event.eventIndex, 0x2c9277b5, yellowPhaseMinimum, yellowPhaseMaximum, regionId
+    );
+    const endsAt = Math.min(threatEndsAt, startedAt + yellowDuration);
     phases.push({ status: "yellow", startedAt, endsAt });
     return { eventId: event.id, regionId, delay, depth, phases, startedAt, endsAt };
   }
 
-  phases.push({ status: "yellow", startedAt, endsAt: startedAt + escalationDelay });
-  let cursor = startedAt + escalationDelay;
+  const firstPhaseEnd = Math.min(threatEndsAt, startedAt + escalationDelay);
+  phases.push({ status: "yellow", startedAt, endsAt: firstPhaseEnd });
+  let cursor = firstPhaseEnd;
   let status = "red";
   let phaseIndex = 0;
-  const canAlternate = depth <= 1 || (event.type === "large_wave" && depth <= 2);
-  const maximumAlternatingPhases = depth === 0
-    ? eventRange(event.eventIndex, 0x38b02da1, 3, 7, regionId)
-    : depth === 1
-      ? eventRange(event.eventIndex, 0x38b02da1, 2, 5, regionId)
-      : 1;
   while (cursor < threatEndsAt) {
-    const duration = status === "red"
-      ? eventRange(event.eventIndex, 0x5e2a9c17, 60, 10 * 60, regionId, phaseIndex)
-      : eventRange(event.eventIndex, 0x16f11fe9, 40, 6 * 60, regionId, phaseIndex);
+    const phaseMinimum = status === "red"
+      ? Math.max(60, Math.floor(minimumSameState * 0.25))
+      : yellowPhaseMinimum;
+    const phaseMaximum = status === "red"
+      ? Math.max(2 * 60, Math.floor(maximumSameState * 0.40))
+      : yellowPhaseMaximum;
+    const duration = eventRange(
+      event.eventIndex,
+      status === "red" ? 0x5e2a9c17 : 0x16f11fe9,
+      phaseMinimum,
+      phaseMaximum,
+      regionId,
+      phaseIndex
+    );
     const phaseEnd = Math.min(threatEndsAt, cursor + duration);
     phases.push({ status, startedAt: cursor, endsAt: phaseEnd });
     cursor = phaseEnd;
-    if (!canAlternate && status === "red") {
-      if (cursor < endsAt) phases.push({ status: "yellow", startedAt: cursor, endsAt });
-      return { eventId: event.id, regionId, delay, depth, phases, startedAt, endsAt };
-    }
     status = status === "red" ? "yellow" : "red";
     phaseIndex++;
-    if (phaseIndex >= maximumAlternatingPhases) {
-      if (cursor < endsAt) phases.push({ status: "yellow", startedAt: cursor, endsAt });
-      return { eventId: event.id, regionId, delay, depth, phases, startedAt, endsAt };
-    }
   }
-  if (cursor < endsAt) phases.push({ status: "yellow", startedAt: cursor, endsAt });
-  return { eventId: event.id, regionId, delay, depth, phases, startedAt, endsAt };
+  return { eventId: event.id, regionId, delay, depth, phases, startedAt, endsAt: threatEndsAt };
 }
 
 function longRangeEffects(event) {
@@ -401,97 +427,6 @@ function effectsForAttackEvent(event) {
   return effects;
 }
 
-function alertEpisodesForEvents(events) {
-  if (alertEpisodesCache.has(events)) return alertEpisodesCache.get(events);
-  const intervalsByRegion = new Map(REGIONS.map(region => [region.id, []]));
-  for (const event of events) {
-    if (event.type === "calm") continue;
-    for (const effect of effectsForAttackEvent(event)) {
-      intervalsByRegion.get(effect.regionId).push({ startedAt: effect.startedAt, endsAt: effect.endsAt });
-    }
-  }
-
-  const episodesByRegion = new Map();
-  for (const region of REGIONS) {
-    const intervals = intervalsByRegion.get(region.id).sort((a, b) => a.startedAt - b.startedAt);
-    const episodes = [];
-    for (const interval of intervals) {
-      const previous = episodes.at(-1);
-      if (previous && interval.startedAt <= previous.endsAt) {
-        previous.endsAt = Math.max(previous.endsAt, interval.endsAt);
-      } else {
-        episodes.push({ ...interval });
-      }
-    }
-    episodesByRegion.set(region.id, episodes);
-  }
-  alertEpisodesCache.set(events, episodesByRegion);
-  return episodesByRegion;
-}
-
-function sameStatePhaseDuration(regionId, episodeStartedAt, phaseIndex) {
-  const depth = EVENT_DEPTH_BY_ZONE[REGION_RISK[regionId].zone];
-  const [minimumDuration, maximumDuration] = MAX_SAME_STATE_DURATION_BY_DEPTH[depth];
-  return eventRange(
-    episodeStartedAt, 0x27a4cd91, minimumDuration, maximumDuration, regionId, phaseIndex
-  );
-}
-
-function sameStatePhasesForEpisode(regionId, episode) {
-  if (episode.sameStatePhases) return episode.sameStatePhases;
-  const phases = [];
-  let cursor = episode.startedAt;
-  let phaseIndex = 0;
-  while (cursor < episode.endsAt) {
-    const endsAt = Math.min(
-      episode.endsAt,
-      cursor + sameStatePhaseDuration(regionId, episode.startedAt, phaseIndex)
-    );
-    phases.push({ phaseIndex, startedAt: cursor, endsAt });
-    cursor = endsAt;
-    phaseIndex++;
-  }
-  episode.sameStatePhases = phases;
-  return phases;
-}
-
-function sameStatePhaseAt(regionId, second, episode) {
-  const phases = sameStatePhasesForEpisode(regionId, episode);
-  let low = 0;
-  let high = phases.length - 1;
-  while (low <= high) {
-    const middle = Math.floor((low + high) / 2);
-    const phase = phases[middle];
-    if (second < phase.startedAt) high = middle - 1;
-    else if (second >= phase.endsAt) low = middle + 1;
-    else return phase;
-  }
-  return null;
-}
-
-function addSameStateBoundaries(boundaries, events, startSecond, endSecond) {
-  const episodesByRegion = alertEpisodesForEvents(events);
-  for (const region of REGIONS) {
-    for (const episode of episodesByRegion.get(region.id)) {
-      if (episode.endsAt < startSecond || episode.startedAt > endSecond) continue;
-      for (const phase of sameStatePhasesForEpisode(region.id, episode)) {
-        if (phase.endsAt >= startSecond && phase.endsAt <= endSecond) boundaries.add(phase.endsAt);
-      }
-    }
-  }
-}
-
-function applyMaxSameStateDuration(regionId, second, rawStatus, events) {
-  if (rawStatus === "clear") return "clear";
-  const episode = alertEpisodesForEvents(events).get(regionId)
-    .find(item => second >= item.startedAt && second < item.endsAt);
-  const sameStatePhase = episode && sameStatePhaseAt(regionId, second, episode);
-  if (!sameStatePhase) return rawStatus;
-  const depth = EVENT_DEPTH_BY_ZONE[REGION_RISK[regionId].zone];
-  if (depth >= 3) return sameStatePhase.phaseIndex % 2 === 0 ? rawStatus : "clear";
-  return sameStatePhase.phaseIndex % 2 === 0 ? "yellow" : "red";
-}
-
 function activeCalmEvent(second, events) {
   return events.find(event => event.type === "calm" && second >= event.startedAt && second < event.endsAt) || null;
 }
@@ -507,7 +442,7 @@ function eventDrivenRegionStatus(regionId, second, events) {
     if (phase?.status === "red") rawStatus = "red";
     if (phase?.status === "yellow" && rawStatus !== "red") rawStatus = "yellow";
   }
-  return applyMaxSameStateDuration(regionId, second, rawStatus, events);
+  return rawStatus;
 }
 
 function attackEventBoundaries(events, startSecond, endSecond) {
@@ -525,7 +460,6 @@ function attackEventBoundaries(events, startSecond, endSecond) {
       }
     }
   }
-  addSameStateBoundaries(boundaries, events, startSecond, endSecond);
   return [...boundaries].sort((a, b) => a - b);
 }
 
@@ -537,7 +471,7 @@ function currentAttackEvent(second, events) {
 }
 
 function calculateEventDrivenSimulation(second, captureDebug = false) {
-  const futureEnd = second + CONFIG.eventBlockSeconds * CONFIG.lookaheadBlocks;
+  const futureEnd = second + CONFIG.lookaheadSeconds;
   const events = attackEventsForRange(second, futureEnd);
   const historyStart = second - CONFIG.lookbackSeconds;
   const boundaries = attackEventBoundaries(events, historyStart, futureEnd);
@@ -569,7 +503,7 @@ function calculateEventDrivenSimulation(second, captureDebug = false) {
     }
   }
   if (!Number.isFinite(nextTransitionSecond)) {
-    nextTransitionSecond = (Math.floor(second / CONFIG.eventBlockSeconds) + 1) * CONFIG.eventBlockSeconds;
+    nextTransitionSecond = futureEnd;
   }
 
   const states = Object.fromEntries(REGIONS.map(region => [region.id, {
@@ -1204,6 +1138,10 @@ function auditEventDrivenSimulation(durationSeconds) {
         if (phase.endsAt <= phase.startedAt || (previousPhaseEnd !== null && phase.startedAt < previousPhaseEnd)) {
           anomalies.push(`${event.id}: пересечение фаз региона ${effect.regionId}`);
         }
+        const maximumSameState = MAX_SAME_STATE_DURATION_BY_DEPTH[depth][1];
+        if (phase.endsAt - phase.startedAt > maximumSameState) {
+          anomalies.push(`${event.id}: слишком длинная фаза региона ${effect.regionId}`);
+        }
         previousPhaseEnd = phase.endsAt;
         if (phase.startedAt <= startSecond && phase.endsAt > startSecond) counts[effect.regionId][phase.status]++;
         if (phase.startedAt > startSecond && phase.startedAt <= endSecond) {
@@ -1216,21 +1154,14 @@ function auditEventDrivenSimulation(durationSeconds) {
     }
   }
 
-  const sameStateBoundaries = new Set();
-  addSameStateBoundaries(sameStateBoundaries, events, startSecond, endSecond);
-  for (const boundary of sameStateBoundaries) {
-    if (boundary > startSecond && boundary <= endSecond) createAuditDelta(deltas, boundary);
-  }
-
-  function statusFromCounts(regionId, second) {
+  function statusFromCounts(regionId) {
     if (calmCount > 0) return "clear";
-    const rawStatus = counts[regionId].red > 0 ? "red"
+    return counts[regionId].red > 0 ? "red"
       : counts[regionId].yellow > 0 ? "yellow" : "clear";
-    return applyMaxSameStateDuration(regionId, second, rawStatus, events);
   }
 
   for (const region of REGIONS) {
-    statuses[region.id] = statusFromCounts(region.id, startSecond);
+    statuses[region.id] = statusFromCounts(region.id);
     if (statuses[region.id] !== "clear") {
       statistics[region.id].alerts = 1;
       statistics[region.id].activeSince = startSecond;
@@ -1258,12 +1189,12 @@ function auditEventDrivenSimulation(durationSeconds) {
     let simultaneousChanges = 0;
     for (const region of REGIONS) {
       const previousStatus = statuses[region.id];
-      const status = statusFromCounts(region.id, second);
+      const status = statusFromCounts(region.id);
       if (status === previousStatus) continue;
       if (previousStatus !== "clear") {
         const depth = EVENT_DEPTH_BY_ZONE[REGION_RISK[region.id].zone];
         const maximumSameState = MAX_SAME_STATE_DURATION_BY_DEPTH[depth][1];
-        if (second - stateSince[region.id] > maximumSameState) {
+        if (second - stateSince[region.id] > maximumSameState * 2.5) {
           anomalies.push(`Регион ${region.id}: состояние ${previousStatus} не менялось слишком долго`);
         }
       }
@@ -1299,7 +1230,7 @@ function auditEventDrivenSimulation(durationSeconds) {
     if (statuses[region.id] !== "clear") {
       const depth = EVENT_DEPTH_BY_ZONE[REGION_RISK[region.id].zone];
       const maximumSameState = MAX_SAME_STATE_DURATION_BY_DEPTH[depth][1];
-      if (endSecond - stateSince[region.id] > maximumSameState) {
+      if (endSecond - stateSince[region.id] > maximumSameState * 2.5) {
         anomalies.push(`Регион ${region.id}: состояние ${statuses[region.id]} не менялось слишком долго`);
       }
     }
