@@ -103,6 +103,61 @@ const NEIGHBOR_INFLUENCE_BY_ZONE = {
   "remote island": 0
 };
 
+// Durations are expressed in five-minute slots. A state can last beyond its
+// target, but every continuous alert episode has a deterministic hard limit.
+const PERSISTENCE_BY_ZONE = {
+  "very deep rear": {
+    yellow: [2, 7], red: [3, 9], maxAlertSlots: 24,
+    afterYellow: { yellow: 0.20, red: 0.08 },
+    afterRed: { yellow: 0.64, red: 0.07 }
+  },
+  "remote island": {
+    yellow: [2, 7], red: [3, 9], maxAlertSlots: 24,
+    afterYellow: { yellow: 0.20, red: 0.08 },
+    afterRed: { yellow: 0.64, red: 0.07 }
+  },
+  "deep rear": {
+    yellow: [2, 7], red: [3, 9], maxAlertSlots: 24,
+    afterYellow: { yellow: 0.20, red: 0.10 },
+    afterRed: { yellow: 0.65, red: 0.07 }
+  },
+  "deep rear / middle depth": {
+    yellow: [3, 9], red: [4, 12], maxAlertSlots: 36,
+    afterYellow: { yellow: 0.24, red: 0.18 },
+    afterRed: { yellow: 0.64, red: 0.12 }
+  },
+  "middle depth": {
+    yellow: [3, 9], red: [4, 12], maxAlertSlots: 36,
+    afterYellow: { yellow: 0.25, red: 0.23 },
+    afterRed: { yellow: 0.62, red: 0.16 }
+  },
+  "middle depth / capital": {
+    yellow: [3, 9], red: [4, 12], maxAlertSlots: 36,
+    afterYellow: { yellow: 0.25, red: 0.23 },
+    afterRed: { yellow: 0.62, red: 0.16 }
+  },
+  "near-front": {
+    yellow: [5, 14], red: [6, 18], maxAlertSlots: 72,
+    afterYellow: { yellow: 0.38, red: 0.40 },
+    afterRed: { yellow: 0.55, red: 0.33 }
+  },
+  "near-front / operational rear": {
+    yellow: [5, 14], red: [6, 18], maxAlertSlots: 72,
+    afterYellow: { yellow: 0.38, red: 0.40 },
+    afterRed: { yellow: 0.55, red: 0.33 }
+  },
+  "frontline": {
+    yellow: [12, 48], red: [12, 54], maxAlertSlots: 144,
+    afterYellow: { yellow: 0.44, red: 0.50 },
+    afterRed: { yellow: 0.55, red: 0.41 }
+  },
+  "frontline / southern frontline": {
+    yellow: [12, 48], red: [12, 54], maxAlertSlots: 144,
+    afterYellow: { yellow: 0.44, red: 0.50 },
+    afterRed: { yellow: 0.55, red: 0.41 }
+  }
+};
+
 const DEBUG_SIMULATION = false;
 
 const STATUS = {
@@ -169,29 +224,36 @@ function neighborModifiers(regionId, previousStates) {
   };
 }
 
-function transitionProbabilities(regionId, previousStatus, modifiers) {
+function stateDurationTarget(regionId, state, profile) {
+  const [minimum, maximum] = profile[state.status];
+  const salt = state.status === "yellow" ? 0x4f1bbcdc : 0x2c9277b5;
+  const roll = deterministicRoll(regionId, state.sinceSlot, salt);
+  return minimum + Math.floor(roll * (maximum - minimum + 1));
+}
+
+function transitionProbabilities(regionId, previousState, modifiers, slot) {
   const risk = REGION_RISK[regionId];
   const baseYellow = CONFIG.chances.yellow * risk.yellow * modifiers.yellow;
   const baseRed = CONFIG.chances.red * risk.red * modifiers.red;
-  let yellow;
-  let red;
-  if (previousStatus === "yellow") {
-    yellow = Math.min(0.70, 0.50 + baseYellow * 0.45);
-    red = Math.min(0.12, baseRed * 1.50);
-  } else if (previousStatus === "red") {
-    yellow = Math.min(0.42, 0.34 + baseYellow * 0.25);
-    red = Math.min(0.62, 0.48 + baseRed * 0.75);
-  } else {
-    yellow = Math.min(0.24, baseYellow);
-    red = Math.min(0.035, baseRed * 0.45);
+  if (previousState.status === "clear") {
+    return {
+      yellow: Math.min(0.24, baseYellow),
+      red: Math.min(0.035, baseRed * 0.45)
+    };
   }
-  const activeTotal = yellow + red;
-  if (activeTotal > CONFIG.probabilityCap) {
-    const scale = CONFIG.probabilityCap / activeTotal;
-    yellow *= scale;
-    red *= scale;
+
+  const profile = PERSISTENCE_BY_ZONE[risk.zone];
+  const alertSinceSlot = previousState.alertSinceSlot ?? previousState.sinceSlot;
+  if (slot - alertSinceSlot >= profile.maxAlertSlots) return { yellow: 0, red: 0 };
+
+  const stateAge = slot - previousState.sinceSlot;
+  if (stateAge < stateDurationTarget(regionId, previousState, profile)) {
+    return previousState.status === "yellow"
+      ? { yellow: 1, red: 0 }
+      : { yellow: 0, red: 1 };
   }
-  return { yellow, red };
+
+  return previousState.status === "yellow" ? profile.afterYellow : profile.afterRed;
 }
 
 function chooseStatus(regionId, slot, probabilities) {
@@ -203,8 +265,14 @@ function chooseStatus(regionId, slot, probabilities) {
 
 function initialStates(cycleStart) {
   return Object.fromEntries(REGIONS.map(region => {
-    const probabilities = transitionProbabilities(region.id, "clear", { yellow: 1, red: 1 });
-    return [region.id, { status: chooseStatus(region.id, cycleStart, probabilities), sinceSlot: cycleStart }];
+    const clearState = { status: "clear", sinceSlot: cycleStart, alertSinceSlot: null };
+    const probabilities = transitionProbabilities(region.id, clearState, { yellow: 1, red: 1 }, cycleStart);
+    const status = chooseStatus(region.id, cycleStart, probabilities);
+    return [region.id, {
+      status,
+      sinceSlot: cycleStart,
+      alertSinceSlot: status === "clear" ? null : cycleStart
+    }];
   }));
 }
 
@@ -220,11 +288,16 @@ function simulateStates(slot) {
     for (const region of REGIONS) {
       const previous = previousStates[region.id];
       const modifiers = neighborModifiers(region.id, previousStates);
-      const probabilities = transitionProbabilities(region.id, previous.status, modifiers);
+      const probabilities = transitionProbabilities(region.id, previous, modifiers, currentSlot);
       const status = chooseStatus(region.id, currentSlot, probabilities);
       nextStates[region.id] = {
         status,
-        sinceSlot: status === previous.status ? previous.sinceSlot : currentSlot
+        sinceSlot: status === previous.status ? previous.sinceSlot : currentSlot,
+        alertSinceSlot: status === "clear"
+          ? null
+          : previous.status === "clear"
+            ? currentSlot
+            : previous.alertSinceSlot
       };
       if (isFinalSlot) {
         debugRows.push({
@@ -263,7 +336,8 @@ function simulateStates(slot) {
 function validateSimulationConfig() {
   const ids = new Set(REGIONS.map(region => region.id));
   for (const id of ids) {
-    if (!REGION_RISK[id] || !REGION_NEIGHBORS[id] || NEIGHBOR_INFLUENCE_BY_ZONE[REGION_RISK[id].zone] === undefined) {
+    const zone = REGION_RISK[id]?.zone;
+    if (!REGION_RISK[id] || !REGION_NEIGHBORS[id] || NEIGHBOR_INFLUENCE_BY_ZONE[zone] === undefined || !PERSISTENCE_BY_ZONE[zone]) {
       throw new Error(`Incomplete simulation configuration for region ${id}`);
     }
     for (const neighborId of REGION_NEIGHBORS[id]) {
