@@ -231,6 +231,7 @@ let historyFilter = "all";
 let dailyStatisticsCache = null;
 let notificationSlot = null;
 let notificationStates = null;
+let lastSimulationSlot = null;
 const renderedMapStatuses = new Map();
 
 function hash32(a) {
@@ -897,10 +898,12 @@ function renderMap() {
   applyMapTheme();
 }
 
-function render() {
-  const now = Date.now();
+function getCurrentSimulationSlot(now = Date.now()) {
+  return Math.floor(now / (CONFIG.slotMinutes * 60 * 1000));
+}
+
+function refreshSimulationState(slot, now = Date.now()) {
   const slotMs = CONFIG.slotMinutes * 60 * 1000;
-  const slot = Math.floor(now / slotMs);
   const simulation = simulateStates(slot);
   processSlotNotifications(slot, simulation.states);
   currentStates = REGIONS.map(region => {
@@ -911,7 +914,15 @@ function render() {
   renderThreats();
   renderStatistics(now);
   if (historyDialog.open) renderHistory(now);
-  updateClock();
+}
+
+function updateIfNeeded(now = Date.now()) {
+  const slot = getCurrentSimulationSlot(now);
+  if (slot !== lastSimulationSlot) {
+    refreshSimulationState(slot, now);
+    lastSimulationSlot = slot;
+  }
+  updateClock(now);
 }
 
 function activeThreats() {
@@ -981,10 +992,10 @@ function updateDurations() {
   });
 }
 
-function updateClock() {
-  const now = new Date();
-  const date = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" }).format(now);
-  const time = new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(now);
+function updateClock(now = Date.now()) {
+  const current = new Date(now);
+  const date = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" }).format(current);
+  const time = new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(current);
   document.querySelector("#current-time").textContent = `${date} · ${time}`;
   updateDurations();
 }
@@ -1037,6 +1048,9 @@ setTheme(getTheme(), false);
 let savedThreatsCollapsed = false;
 try { savedThreatsCollapsed = localStorage.getItem(COLLAPSE_KEY) === "true"; } catch (_) {}
 setThreatsCollapsed(window.matchMedia("(max-width: 640px)").matches || savedThreatsCollapsed);
-render();
-setInterval(updateClock, 1000);
-setInterval(render, 30_000);
+updateIfNeeded();
+setInterval(updateIfNeeded, 1000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) updateIfNeeded();
+});
+window.addEventListener("focus", () => updateIfNeeded());
