@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=5">
+  <link rel="stylesheet" href="styles.css?v=6">
 </head>
 <body>
   <header class="app-header">
@@ -68,6 +68,10 @@
       <button class="dialog-close" id="statistics-close" type="button" aria-label="Закрыть статистику">Закрыть</button>
     </div>
     <div class="statistics-grid" id="statistics-grid"></div>
+    <section class="statistics-duration" aria-labelledby="duration-title">
+      <h3 id="duration-title">Общая длительность по регионам</h3>
+      <div class="duration-list" id="duration-list"></div>
+    </section>
   </dialog>
 
   <dialog class="history-dialog" id="history-dialog" aria-labelledby="history-title">
@@ -86,6 +90,8 @@
     <div class="history-list" id="history-list" aria-live="polite"></div>
   </dialog>
 
-  <script src="app.js?v=5"></script>
+  <div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="false"></div>
+
+  <script src="app.js?v=6"></script>
 </body>
 </html>

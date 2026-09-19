@@ -35,6 +35,18 @@ const REGIONS = [
   { id: 34, name: "Гесперидия" }
 ];
 
+const REGION_LOCATIVE = {
+  1: "Иудее", 2: "Салабимии", 3: "Эндоре", 4: "Калантии",
+  5: "Гесперии", 6: "Ориентии", 7: "Люцинии", 8: "Сидерии",
+  9: "Наяде", 10: "Клерополе", 11: "Соларии", 12: "Селении",
+  13: "Аргезии", 14: "Нереиде", 15: "Альтерии", 16: "Сильвании",
+  17: "Таврии", 18: "Валентии", 19: "Иллирии", 20: "Астралии",
+  21: "Лимниде", 22: "Небулии", 23: "Кастелии", 24: "Медиолании",
+  25: "Окцидентии", 26: "Виридии", 27: "Тенебрии", 28: "Монтании",
+  29: "Маринии", 30: "Меридионии", 31: "Эстерии", 32: "Джаннат-аль-Амне",
+  33: "Ойле", 34: "Гесперидии"
+};
+
 const REGION_RISK = {
   1: { zone: "very deep rear", yellow: 0.18, red: 0.07 },
   2: { zone: "very deep rear", yellow: 0.20, red: 0.08 },
@@ -216,6 +228,10 @@ let mapDocument = null;
 let simulationCache = null;
 let historyCache = null;
 let historyFilter = "all";
+let dailyStatisticsCache = null;
+let notificationSlot = null;
+let notificationStates = null;
+const renderedMapStatuses = new Map();
 
 function hash32(a) {
   a |= 0; a = a + 0x7ed55d16 + (a << 12) | 0; a = (a ^ 0xc761c23c) ^ (a >>> 19);
@@ -615,11 +631,72 @@ function formatHistoryDuration(event, now) {
   return totalMinutes ? `${totalMinutes} мин` : "менее минуты";
 }
 
-function historyEvents() {
+function allHistoryEvents() {
   const ongoing = Object.values(historyCache.openEvents).map(event => ({ ...event, endSlot: null }));
-  return [...historyCache.events, ...ongoing]
+  return [...historyCache.events, ...ongoing];
+}
+
+function historyEvents() {
+  return allHistoryEvents()
     .filter(event => historyFilter === "all" || event.status === historyFilter)
     .sort((a, b) => b.startSlot - a.startSlot || b.regionId - a.regionId);
+}
+
+function formatTotalMinutes(totalMinutes) {
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours) return `${hours} ч${minutes ? ` ${minutes} мин` : ""}`;
+  return totalMinutes ? `${totalMinutes} мин` : "0 мин";
+}
+
+function calculateDailyStatistics(now = Date.now()) {
+  ensureHistoryCache(now);
+  if (dailyStatisticsCache?.dayKey === historyCache.dayKey
+      && dailyStatisticsCache.throughSlot === historyCache.throughSlot) {
+    return dailyStatisticsCache.value;
+  }
+
+  const events = allHistoryEvents();
+  const dayStartSlot = historyDayStartSlot(now);
+  const endSlot = historyCache.throughSlot;
+  const countsByLevel = { yellow: 0, red: 0 };
+  const countsByRegion = Object.fromEntries(REGIONS.map(region => [region.id, 0]));
+  const durationByRegion = Object.fromEntries(REGIONS.map(region => [region.id, 0]));
+  let longestCompleted = null;
+
+  for (const event of events) {
+    countsByLevel[event.status]++;
+    countsByRegion[event.regionId]++;
+    const clippedStart = Math.max(event.startSlot, dayStartSlot);
+    const clippedEnd = Math.min(event.endSlot ?? endSlot, endSlot);
+    durationByRegion[event.regionId] += Math.max(0, clippedEnd - clippedStart) * CONFIG.slotMinutes;
+    if (event.endSlot !== null) {
+      const durationSlots = event.endSlot - event.startSlot;
+      if (!longestCompleted || durationSlots > longestCompleted.durationSlots) {
+        longestCompleted = { ...event, durationSlots };
+      }
+    }
+  }
+
+  const regionLeader = REGIONS
+    .map(region => ({ ...region, count: countsByRegion[region.id] }))
+    .sort((a, b) => b.count - a.count || a.id - b.id)[0];
+  const durations = REGIONS
+    .map(region => ({ ...region, totalMinutes: durationByRegion[region.id] }))
+    .filter(region => region.totalMinutes > 0)
+    .sort((a, b) => b.totalMinutes - a.totalMinutes || a.id - b.id);
+
+  const value = {
+    total: events.length,
+    yellow: countsByLevel.yellow,
+    red: countsByLevel.red,
+    active: Object.values(historyCache.states).filter(state => state.status !== "clear").length,
+    regionLeader,
+    longestCompleted,
+    durations
+  };
+  dailyStatisticsCache = { dayKey: historyCache.dayKey, throughSlot: historyCache.throughSlot, value };
+  return value;
 }
 
 function renderHistory(now = Date.now()) {
@@ -640,6 +717,80 @@ function renderHistory(now = Date.now()) {
         </span>
       </div>`;
   }).join("") : '<div class="empty-history">За сегодня событий нет.</div>';
+}
+
+function notificationMessages(changes) {
+  const messages = [];
+  for (const status of ["red", "yellow", "clear"]) {
+    const items = changes.filter(change => change.status === status);
+    if (!items.length) continue;
+    if (items.length === 1) {
+      const place = REGION_LOCATIVE[items[0].regionId];
+      messages.push({
+        type: status,
+        text: status === "clear"
+          ? `Отбой тревоги в ${place}`
+          : `В ${place} объявлен ${status === "red" ? "красный" : "жёлтый"} уровень`
+      });
+    } else {
+      messages.push({
+        type: status,
+        text: status === "clear"
+          ? `Отбой тревоги в ${items.length} регионах`
+          : `${status === "red" ? "Красный" : "Жёлтый"} уровень объявлен в ${items.length} регионах`
+      });
+    }
+  }
+  return messages;
+}
+
+function dismissToast(toast) {
+  if (!toast.isConnected) return;
+  toast.classList.add("leaving");
+  setTimeout(() => toast.remove(), 190);
+}
+
+function showToast(message) {
+  const stack = document.querySelector("#toast-stack");
+  while (stack.children.length >= 3) stack.firstElementChild.remove();
+  const toast = document.createElement("div");
+  toast.className = `toast ${message.type}`;
+  toast.setAttribute("role", "status");
+  toast.innerHTML = `<span>${message.text}</span><button class="toast-close" type="button" aria-label="Закрыть уведомление">×</button>`;
+  toast.querySelector(".toast-close").addEventListener("click", () => dismissToast(toast));
+  stack.append(toast);
+  setTimeout(() => dismissToast(toast), 6000);
+}
+
+function processSlotNotifications(slot, states) {
+  if (notificationSlot === null) {
+    notificationSlot = slot;
+    notificationStates = states;
+    return;
+  }
+  if (slot <= notificationSlot) return;
+  if (slot - notificationSlot > CONFIG.historySlots) {
+    notificationSlot = slot;
+    notificationStates = states;
+    return;
+  }
+
+  const changes = [];
+  let previousStates = notificationStates;
+  for (let currentSlot = notificationSlot + 1; currentSlot <= slot; currentSlot++) {
+    const cycleOffset = ((currentSlot % CONFIG.historySlots) + CONFIG.historySlots) % CONFIG.historySlots;
+    const nextStates = cycleOffset === 0 ? initialStates(currentSlot) : advanceSimulation(previousStates, currentSlot).states;
+    for (const region of REGIONS) {
+      const previousStatus = previousStates[region.id].status;
+      const status = nextStates[region.id].status;
+      if (status !== previousStatus) changes.push({ regionId: region.id, previousStatus, status, slot: currentSlot });
+    }
+    previousStates = nextStates;
+  }
+
+  notificationSlot = slot;
+  notificationStates = states;
+  notificationMessages(changes).forEach(showToast);
 }
 
 function getTheme() {
@@ -710,6 +861,7 @@ function bindMap() {
   if (groups.length !== REGIONS.length) throw new Error(`Expected 34 regions, found ${groups.length}`);
 
   installRegionNames();
+  renderedMapStatuses.clear();
   groups.forEach(group => {
     const id = Number(group.dataset.regionId);
     const region = REGIONS.find(item => item.id === id);
@@ -719,14 +871,28 @@ function bindMap() {
   applyMapTheme();
 }
 
+function shouldEmphasizeTransition(previousStatus, status) {
+  return previousStatus !== undefined
+    && ((previousStatus === "clear" && status !== "clear")
+      || (previousStatus === "yellow" && status === "red"));
+}
+
 function renderMap() {
   if (!mapDocument) return;
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   currentStates.forEach(item => {
     const group = mapDocument.querySelector(`[data-region-id="${item.id}"]`);
     if (!group) return;
+    const previousStatus = renderedMapStatuses.get(item.id);
+    const emphasize = shouldEmphasizeTransition(previousStatus, item.status);
     group.setAttribute("class", `region ${item.status}`);
+    if (emphasize && !reduceMotion) {
+      group.classList.add("emphasis");
+      group.addEventListener("animationend", () => group.classList.remove("emphasis"), { once: true });
+    }
     group.dataset.status = item.status;
     group.setAttribute("aria-label", `${item.name}: ${STATUS[item.status].label}`);
+    renderedMapStatuses.set(item.id, item.status);
   });
   applyMapTheme();
 }
@@ -736,13 +902,14 @@ function render() {
   const slotMs = CONFIG.slotMinutes * 60 * 1000;
   const slot = Math.floor(now / slotMs);
   const simulation = simulateStates(slot);
+  processSlotNotifications(slot, simulation.states);
   currentStates = REGIONS.map(region => {
     const generated = simulation.states[region.id];
     return { ...region, ...generated, since: generated.sinceSlot * slotMs };
   });
   renderMap();
   renderThreats();
-  renderStatistics();
+  renderStatistics(now);
   if (historyDialog.open) renderHistory(now);
   updateClock();
 }
@@ -775,16 +942,37 @@ function alertCountLabel(count) {
   return `${count} активных тревог`;
 }
 
-function renderStatistics() {
-  const counts = Object.fromEntries(Object.keys(STATUS).map(key => [key, 0]));
-  currentStates.forEach(item => counts[item.status]++);
-  const labels = { ...Object.fromEntries(Object.entries(STATUS).map(([key, value]) => [key, value.label])), clear: "Без тревоги" };
-  const order = ["red", "yellow", "clear"];
-  document.querySelector("#statistics-grid").innerHTML = order.map(key => `
-    <div class="stat-item ${key}">
-      <strong class="stat-value">${counts[key]}</strong>
-      <span class="stat-label">${labels[key]}</span>
+function renderStatistics(now = Date.now()) {
+  const statistics = calculateDailyStatistics(now);
+  const longest = statistics.longestCompleted;
+  const cards = [
+    { value: statistics.total, label: "Всего тревог сегодня" },
+    { value: statistics.yellow, label: "Жёлтых тревог сегодня", className: "yellow" },
+    { value: statistics.red, label: "Красных тревог сегодня", className: "red" },
+    { value: statistics.active, label: "Регионов активно сейчас" },
+    {
+      value: statistics.regionLeader.count ? `${statistics.regionLeader.id} — ${statistics.regionLeader.name}` : "—",
+      label: statistics.regionLeader.count ? `${statistics.regionLeader.count} событий · больше всего сегодня` : "Событий пока нет",
+      text: true
+    },
+    {
+      value: longest ? formatTotalMinutes(longest.durationSlots * CONFIG.slotMinutes) : "—",
+      label: longest ? `Самая долгая завершённая · ${longest.regionId} — ${longest.regionName}` : "Завершённых тревог пока нет",
+      text: true
+    }
+  ];
+  document.querySelector("#statistics-grid").innerHTML = cards.map(card => `
+    <div class="stat-item ${card.className || ""}">
+      <strong class="stat-value${card.text ? " text" : ""}">${card.value}</strong>
+      <span class="stat-label">${card.label}</span>
     </div>`).join("");
+  document.querySelector("#duration-list").innerHTML = statistics.durations.length
+    ? statistics.durations.map(region => `
+      <div class="duration-row">
+        <span class="duration-region">${region.id} — ${region.name}</span>
+        <span class="duration-value">${formatTotalMinutes(region.totalMinutes)}</span>
+      </div>`).join("")
+    : '<div class="empty-history">Сегодня тревог не было.</div>';
 }
 
 function updateDurations() {
@@ -813,7 +1001,10 @@ themeToggle.addEventListener("click", () => {
 });
 
 threatsToggle.addEventListener("click", () => setThreatsCollapsed(!threatsPanel.classList.contains("collapsed")));
-document.querySelector("#statistics-button").addEventListener("click", () => statisticsDialog.showModal());
+document.querySelector("#statistics-button").addEventListener("click", () => {
+  renderStatistics();
+  statisticsDialog.showModal();
+});
 document.querySelector("#statistics-close").addEventListener("click", () => statisticsDialog.close());
 statisticsDialog.addEventListener("click", event => {
   if (event.target === statisticsDialog) statisticsDialog.close();
