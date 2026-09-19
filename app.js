@@ -165,6 +165,12 @@ const FRONTLINE_REGION_IDS = REGIONS
 
 const THEME_KEY = "lumenaria-theme";
 const COLLAPSE_KEY = "lumenaria-threats-collapsed";
+const SIMULATION_LAB_ENABLED = new URLSearchParams(window.location.search).get("debug") === "1";
+const simulationLabClock = {
+  speed: 1,
+  realAnchorMs: Date.now(),
+  virtualAnchorMs: Date.now()
+};
 const mapObject = document.querySelector("#alarm-map");
 const threatsPanel = document.querySelector("#threats-panel");
 const threatsToggle = document.querySelector("#threats-toggle");
@@ -181,6 +187,12 @@ let notificationSecond = null;
 let lastSimulationSecond = null;
 let simulationUpdateTimer = null;
 const renderedMapStatuses = new Map();
+
+function simulationNow() {
+  if (!SIMULATION_LAB_ENABLED) return Date.now();
+  return simulationLabClock.virtualAnchorMs
+    + (Date.now() - simulationLabClock.realAnchorMs) * simulationLabClock.speed;
+}
 
 function hash32(a) {
   a |= 0; a = a + 0x7ed55d16 + (a << 12) | 0; a = (a ^ 0xc761c23c) ^ (a >>> 19);
@@ -531,7 +543,7 @@ function formatEventTime(ms) {
 }
 
 function formatDuration(since) {
-  const totalMinutes = Math.max(0, Math.floor((Date.now() - since) / 60000));
+  const totalMinutes = Math.max(0, Math.floor((simulationNow() - since) / 60000));
   const days = Math.floor(totalMinutes / 1440);
   const hours = Math.floor((totalMinutes % 1440) / 60);
   const minutes = totalMinutes % 60;
@@ -612,7 +624,7 @@ function createHistoryCache(now, targetSecond = Math.floor(now / 1000)) {
   return cache;
 }
 
-function ensureHistoryCache(now = Date.now()) {
+function ensureHistoryCache(now = simulationNow()) {
   const targetSecond = Math.floor(now / 1000);
   if (!historyCache
       || historyCache.dayKey !== historyDayKey(now)
@@ -650,7 +662,7 @@ function formatTotalMinutes(totalMinutes) {
   return totalMinutes ? `${totalMinutes} мин` : "0 мин";
 }
 
-function calculateDailyStatistics(now = Date.now()) {
+function calculateDailyStatistics(now = simulationNow()) {
   ensureHistoryCache(now);
   if (dailyStatisticsCache?.dayKey === historyCache.dayKey
       && dailyStatisticsCache.throughSecond === historyCache.throughSecond) {
@@ -700,7 +712,7 @@ function calculateDailyStatistics(now = Date.now()) {
   return value;
 }
 
-function renderHistory(now = Date.now()) {
+function renderHistory(now = simulationNow()) {
   ensureHistoryCache(now);
   const events = historyEvents();
   document.querySelector("#history-list").innerHTML = events.length ? events.map(event => {
@@ -882,11 +894,11 @@ function renderMap() {
   applyMapTheme();
 }
 
-function getCurrentSimulationSecond(now = Date.now()) {
+function getCurrentSimulationSecond(now = simulationNow()) {
   return Math.floor(now / 1000);
 }
 
-function refreshSimulationState(second, now = Date.now()) {
+function refreshSimulationState(second, now = simulationNow()) {
   const simulation = simulateStates(second);
   processSecondNotifications(second);
   currentStates = REGIONS.map(region => {
@@ -899,7 +911,7 @@ function refreshSimulationState(second, now = Date.now()) {
   if (historyDialog.open) renderHistory(now);
 }
 
-function updateSimulationIfNeeded(now = Date.now()) {
+function updateSimulationIfNeeded(now = simulationNow()) {
   const second = getCurrentSimulationSecond(now);
   if (second !== lastSimulationSecond) {
     refreshSimulationState(second, now);
@@ -908,11 +920,12 @@ function updateSimulationIfNeeded(now = Date.now()) {
   updateClock(now);
 }
 
-function scheduleNextSimulationUpdate(now = Date.now()) {
+function scheduleNextSimulationUpdate(now = simulationNow()) {
   clearTimeout(simulationUpdateTimer);
   const second = getCurrentSimulationSecond(now);
   const simulation = simulateStates(second);
-  const delay = Math.max(25, simulation.nextTransitionSecond * 1000 - now + 25);
+  const virtualDelay = simulation.nextTransitionSecond * 1000 - now + 25;
+  const delay = Math.max(25, SIMULATION_LAB_ENABLED ? virtualDelay / simulationLabClock.speed : virtualDelay);
   simulationUpdateTimer = setTimeout(() => {
     updateSimulationIfNeeded();
     scheduleNextSimulationUpdate();
@@ -947,7 +960,7 @@ function alertCountLabel(count) {
   return `${count} активных тревог`;
 }
 
-function renderStatistics(now = Date.now()) {
+function renderStatistics(now = simulationNow()) {
   const statistics = calculateDailyStatistics(now);
   const longest = statistics.longestCompleted;
   const cards = [
@@ -986,12 +999,357 @@ function updateDurations() {
   });
 }
 
-function updateClock(now = Date.now()) {
+function updateClock(now = simulationNow()) {
   const current = new Date(now);
   const date = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" }).format(current);
   const time = new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(current);
   document.querySelector("#current-time").textContent = `${date} · ${time}`;
   updateDurations();
+  renderSimulationLabClock(now);
+}
+
+function setSimulationLabSpeed(speed) {
+  const virtualNow = simulationNow();
+  simulationLabClock.virtualAnchorMs = virtualNow;
+  simulationLabClock.realAnchorMs = Date.now();
+  simulationLabClock.speed = speed;
+  scheduleNextSimulationUpdate(virtualNow);
+  renderSimulationLabClock(virtualNow);
+}
+
+function setSimulationLabTime(virtualTimeMs, speed = simulationLabClock.speed) {
+  simulationLabClock.virtualAnchorMs = virtualTimeMs;
+  simulationLabClock.realAnchorMs = Date.now();
+  simulationLabClock.speed = speed;
+  simulationCache = null;
+  historyCache = null;
+  dailyStatisticsCache = null;
+  lastSimulationSecond = null;
+  notificationSecond = Math.floor(virtualTimeMs / 1000);
+  updateSimulationIfNeeded(virtualTimeMs);
+  scheduleNextSimulationUpdate(virtualTimeMs);
+  renderSimulationLabClock(virtualTimeMs);
+}
+
+function renderSimulationLabClock(now = simulationNow()) {
+  if (!SIMULATION_LAB_ENABLED) return;
+  const clock = document.querySelector("#simulation-lab-clock");
+  if (!clock) return;
+  clock.textContent = `${new Date(now).toISOString().replace("T", " ").replace(".000Z", " UTC")} · ${simulationLabClock.speed}×`;
+  document.querySelectorAll("[data-lab-speed]").forEach(button => {
+    button.classList.toggle("active", Number(button.dataset.labSpeed) === simulationLabClock.speed);
+  });
+}
+
+function createAuditDelta(deltas, second) {
+  if (!deltas.has(second)) deltas.set(second, { calm: 0, regions: new Map() });
+  return deltas.get(second);
+}
+
+function addAuditRegionDelta(deltas, second, regionId, status, amount) {
+  const delta = createAuditDelta(deltas, second);
+  if (!delta.regions.has(regionId)) delta.regions.set(regionId, { yellow: 0, red: 0 });
+  delta.regions.get(regionId)[status] += amount;
+}
+
+function auditEventDrivenSimulation(durationSeconds) {
+  const startSecond = Math.floor(simulationNow() / 1000);
+  const endSecond = startSecond + durationSeconds;
+  const events = attackEventsForRange(startSecond, endSecond);
+  const loggedEvents = events.filter(event => event.startedAt >= startSecond && event.startedAt < endSecond);
+  const counts = Object.fromEntries(REGIONS.map(region => [region.id, { yellow: 0, red: 0 }]));
+  const statuses = Object.fromEntries(REGIONS.map(region => [region.id, "clear"]));
+  const statistics = Object.fromEntries(REGIONS.map(region => [region.id, {
+    yellowSeconds: 0,
+    redSeconds: 0,
+    alerts: 0,
+    transitions: 0,
+    longestSeconds: 0,
+    activeSince: null
+  }]));
+  const deltas = new Map();
+  const anomalies = [];
+  let calmCount = 0;
+
+  for (const event of events) {
+    if (!Number.isInteger(event.startedAt) || !Number.isInteger(event.endsAt) || event.endsAt <= event.startedAt) {
+      anomalies.push(`${event.id}: некорректные временные границы`);
+    }
+    if (event.type === "calm") {
+      if (event.startedAt <= startSecond && event.endsAt > startSecond) calmCount++;
+      if (event.startedAt > startSecond && event.startedAt <= endSecond) createAuditDelta(deltas, event.startedAt).calm++;
+      if (event.endsAt > startSecond && event.endsAt <= endSecond) createAuditDelta(deltas, event.endsAt).calm--;
+      continue;
+    }
+
+    const effects = effectsForAttackEvent(event);
+    const affectedIds = new Set(effects.map(effect => effect.regionId));
+    for (const effect of effects) {
+      const depth = EVENT_DEPTH_BY_ZONE[REGION_RISK[effect.regionId].zone];
+      if (depth >= 3 && event.type !== "large_wave" && event.type !== "long_range_strike") {
+        anomalies.push(`${event.id}: необъяснимая тревога глубокого тыла в регионе ${effect.regionId}`);
+      }
+      if (event.type !== "long_range_strike" && effect.regionId !== event.originRegionId
+          && !REGION_NEIGHBORS[effect.regionId].some(id => affectedIds.has(id))) {
+        anomalies.push(`${event.id}: регион ${effect.regionId} не связан с волной`);
+      }
+      if (event.type !== "long_range_strike" && effect.regionId !== event.originRegionId && effect.delay < 20) {
+        anomalies.push(`${event.id}: слишком малая задержка региона ${effect.regionId}`);
+      }
+      let previousPhaseEnd = null;
+      for (const phase of effect.phases) {
+        if (phase.endsAt <= phase.startedAt || (previousPhaseEnd !== null && phase.startedAt < previousPhaseEnd)) {
+          anomalies.push(`${event.id}: пересечение фаз региона ${effect.regionId}`);
+        }
+        previousPhaseEnd = phase.endsAt;
+        if (phase.startedAt <= startSecond && phase.endsAt > startSecond) counts[effect.regionId][phase.status]++;
+        if (phase.startedAt > startSecond && phase.startedAt <= endSecond) {
+          addAuditRegionDelta(deltas, phase.startedAt, effect.regionId, phase.status, 1);
+        }
+        if (phase.endsAt > startSecond && phase.endsAt <= endSecond) {
+          addAuditRegionDelta(deltas, phase.endsAt, effect.regionId, phase.status, -1);
+        }
+      }
+    }
+  }
+
+  function statusFromCounts(regionId) {
+    if (calmCount > 0) return "clear";
+    if (counts[regionId].red > 0) return "red";
+    if (counts[regionId].yellow > 0) return "yellow";
+    return "clear";
+  }
+
+  for (const region of REGIONS) {
+    statuses[region.id] = statusFromCounts(region.id);
+    if (statuses[region.id] !== "clear") {
+      statistics[region.id].alerts = 1;
+      statistics[region.id].activeSince = startSecond;
+    }
+  }
+
+  let previousSecond = startSecond;
+  let maxSimultaneousOutsideCalm = 0;
+  let allClearSeconds = 0;
+  for (const second of [...deltas.keys()].filter(value => value > startSecond && value <= endSecond).sort((a, b) => a - b)) {
+    const elapsed = second - previousSecond;
+    const activeIds = REGIONS.filter(region => statuses[region.id] !== "clear").map(region => region.id);
+    if (!activeIds.length) allClearSeconds += elapsed;
+    for (const region of REGIONS) {
+      if (statuses[region.id] === "yellow") statistics[region.id].yellowSeconds += elapsed;
+      if (statuses[region.id] === "red") statistics[region.id].redSeconds += elapsed;
+    }
+
+    const delta = deltas.get(second);
+    calmCount += delta.calm;
+    for (const [regionId, change] of delta.regions) {
+      counts[regionId].yellow += change.yellow;
+      counts[regionId].red += change.red;
+    }
+    let simultaneousChanges = 0;
+    for (const region of REGIONS) {
+      const previousStatus = statuses[region.id];
+      const status = statusFromCounts(region.id);
+      if (status === previousStatus) continue;
+      simultaneousChanges++;
+      statistics[region.id].transitions++;
+      if (previousStatus === "clear" && status !== "clear") {
+        statistics[region.id].alerts++;
+        statistics[region.id].activeSince = second;
+      } else if (previousStatus !== "clear" && status === "clear") {
+        const activeSince = statistics[region.id].activeSince ?? startSecond;
+        statistics[region.id].longestSeconds = Math.max(statistics[region.id].longestSeconds, second - activeSince);
+        statistics[region.id].activeSince = null;
+      }
+      statuses[region.id] = status;
+    }
+    if (calmCount === 0 && delta.calm === 0) {
+      maxSimultaneousOutsideCalm = Math.max(maxSimultaneousOutsideCalm, simultaneousChanges);
+    }
+    previousSecond = second;
+  }
+
+  const remaining = endSecond - previousSecond;
+  if (remaining > 0) {
+    const activeIds = REGIONS.filter(region => statuses[region.id] !== "clear").map(region => region.id);
+    if (!activeIds.length) allClearSeconds += remaining;
+    for (const region of REGIONS) {
+      if (statuses[region.id] === "yellow") statistics[region.id].yellowSeconds += remaining;
+      if (statuses[region.id] === "red") statistics[region.id].redSeconds += remaining;
+    }
+  }
+  for (const region of REGIONS) {
+    if (statistics[region.id].activeSince !== null) {
+      statistics[region.id].longestSeconds = Math.max(
+        statistics[region.id].longestSeconds,
+        endSecond - statistics[region.id].activeSince
+      );
+    }
+  }
+
+  const calmEvents = loggedEvents.filter(event => event.type === "calm");
+  for (const event of calmEvents) {
+    const sample = Math.floor((event.startedAt + event.endsAt) / 2);
+    const sampleEvents = attackEventsForRange(sample, sample);
+    if (REGIONS.some(region => eventDrivenRegionStatus(region.id, sample, sampleEvents) !== "clear")) {
+      anomalies.push(`${event.id}: окно затишья не очистило карту`);
+    }
+  }
+  if (maxSimultaneousOutsideCalm > 12) {
+    anomalies.push(`Слишком много одновременных переходов вне затишья: ${maxSimultaneousOutsideCalm}`);
+  }
+
+  const regionRows = REGIONS.map(region => {
+    const values = statistics[region.id];
+    const totalActive = values.yellowSeconds + values.redSeconds;
+    return {
+      id: region.id,
+      name: region.name,
+      zone: REGION_RISK[region.id].zone,
+      alerts: values.alerts,
+      transitions: values.transitions,
+      yellowMinutes: Math.floor(values.yellowSeconds / 60),
+      redMinutes: Math.floor(values.redSeconds / 60),
+      longestMinutes: Math.floor(values.longestSeconds / 60),
+      activePercent: totalActive / durationSeconds * 100
+    };
+  });
+  const eventCounts = {};
+  for (const event of loggedEvents) eventCounts[event.type] = (eventCounts[event.type] || 0) + 1;
+  return {
+    startSecond,
+    endSecond,
+    durationSeconds,
+    events: loggedEvents,
+    eventCounts,
+    regionRows,
+    anomalies: [...new Set(anomalies)],
+    allClearSeconds,
+    maxSimultaneousOutsideCalm
+  };
+}
+
+function testSimulationDeterminism(durationSeconds) {
+  const startSecond = Math.floor(simulationNow() / 1000);
+  const samples = 24;
+  for (let index = 0; index <= samples; index++) {
+    const second = startSecond + Math.floor(durationSeconds * index / samples);
+    const first = calculateSimulation(second);
+    const secondRun = calculateSimulation(second);
+    if (JSON.stringify(first.states) !== JSON.stringify(secondRun.states)
+        || first.nextTransitionSecond !== secondRun.nextTransitionSecond) {
+      return { passed: false, second };
+    }
+  }
+  return { passed: true, samples: samples + 1 };
+}
+
+function formatAuditMinutes(minutes) {
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return hours ? `${hours} ч ${rest} мин` : `${rest} мин`;
+}
+
+function renderSimulationAudit(audit) {
+  const summary = document.querySelector("#simulation-lab-summary");
+  summary.innerHTML = `
+    <strong>${Object.values(audit.eventCounts).reduce((sum, value) => sum + value, 0)} событий</strong>
+    <span>Полностью спокойно: ${formatAuditMinutes(Math.floor(audit.allClearSeconds / 60))}</span>
+    <span>Максимум одновременных переходов вне затишья: ${audit.maxSimultaneousOutsideCalm}</span>
+    <span>${Object.entries(audit.eventCounts).map(([type, count]) => `${type}: ${count}`).join(" · ")}</span>`;
+  document.querySelector("#simulation-lab-anomalies").innerHTML = audit.anomalies.length
+    ? audit.anomalies.map(item => `<li>${item}</li>`).join("")
+    : "<li>Аномалии не обнаружены.</li>";
+  document.querySelector("#simulation-lab-regions tbody").innerHTML = audit.regionRows.map(row => `
+    <tr>
+      <td>${row.id}</td><td>${row.name}</td><td>${row.zone}</td>
+      <td>${row.alerts}</td><td>${row.transitions}</td>
+      <td>${formatAuditMinutes(row.yellowMinutes)}</td><td>${formatAuditMinutes(row.redMinutes)}</td>
+      <td>${formatAuditMinutes(row.longestMinutes)}</td><td>${row.activePercent.toFixed(1)}%</td>
+    </tr>`).join("");
+  document.querySelector("#simulation-lab-events tbody").innerHTML = [...audit.events]
+    .sort((a, b) => b.startedAt - a.startedAt)
+    .slice(0, 500)
+    .map(event => `
+      <tr>
+        <td>${new Date(event.startedAt * 1000).toISOString().replace("T", " ").slice(0, 19)}</td>
+        <td>${event.type}</td><td>${event.originSector}</td>
+        <td>${event.severity.toFixed(2)}</td><td>${event.maxDepth}</td>
+        <td>${effectsForAttackEvent(event).length}</td>
+      </tr>`).join("");
+}
+
+function runSimulationLabAudit(durationSeconds) {
+  const status = document.querySelector("#simulation-lab-status");
+  status.textContent = "Выполняется аудит…";
+  setTimeout(() => {
+    const startedAt = performance.now();
+    const audit = auditEventDrivenSimulation(durationSeconds);
+    renderSimulationAudit(audit);
+    status.textContent = `Готово за ${Math.round(performance.now() - startedAt)} мс`;
+  }, 0);
+}
+
+function initializeSimulationLab() {
+  if (!SIMULATION_LAB_ENABLED) return;
+  const style = document.createElement("style");
+  style.textContent = `
+    .simulation-lab{position:fixed;z-index:1000;right:12px;bottom:12px;width:min(720px,calc(100vw - 24px));max-height:82vh;overflow:auto;background:#171a1e;color:#f4f4f4;border:1px solid #4a5159;border-radius:12px;box-shadow:0 14px 40px #0009;font:12px/1.4 system-ui,sans-serif}
+    .simulation-lab summary{position:sticky;top:0;z-index:2;padding:10px 12px;background:#20242a;cursor:pointer;font-weight:700}
+    .simulation-lab-body{padding:10px}.simulation-lab h3{margin:12px 0 6px;font-size:13px}.simulation-lab-controls{display:flex;gap:5px;flex-wrap:wrap;margin:6px 0}
+    .simulation-lab button{padding:5px 8px;color:inherit;background:#292f36;border:1px solid #515b66;border-radius:6px;cursor:pointer}.simulation-lab button.active{background:#8b6420;border-color:#e6b94a}
+    .simulation-lab-clock{font:600 13px/1.4 ui-monospace,monospace}.simulation-lab-summary{display:grid;gap:3px;margin:8px 0}.simulation-lab-status{color:#b9c0c8}
+    .simulation-lab-table-wrap{max-height:220px;overflow:auto;border:1px solid #394049;border-radius:6px}.simulation-lab table{width:100%;border-collapse:collapse;white-space:nowrap}.simulation-lab th,.simulation-lab td{padding:4px 6px;border-bottom:1px solid #30363d;text-align:left}.simulation-lab th{position:sticky;top:0;background:#252a30}.simulation-lab-anomalies{margin:4px 0;padding-left:20px}
+    @media(max-width:640px){.simulation-lab{right:6px;bottom:6px;width:calc(100vw - 12px);max-height:70vh}}
+  `;
+  document.head.append(style);
+  const lab = document.createElement("details");
+  lab.className = "simulation-lab";
+  lab.open = true;
+  lab.innerHTML = `
+    <summary>Simulation Lab · только ?debug=1</summary>
+    <div class="simulation-lab-body">
+      <div class="simulation-lab-clock" id="simulation-lab-clock"></div>
+      <div class="simulation-lab-controls" aria-label="Скорость симуляции">
+        ${[1, 2, 10, 60, 360].map(speed => `<button type="button" data-lab-speed="${speed}">${speed}×</button>`).join("")}
+      </div>
+      <div class="simulation-lab-controls" aria-label="Переход по времени">
+        ${[-24, -6, -1, 1, 6, 24].map(hours => `<button type="button" data-lab-jump="${hours}">${hours > 0 ? "+" : ""}${hours} ч</button>`).join("")}
+        <button type="button" id="simulation-lab-now">Вернуться к текущему времени</button>
+      </div>
+      <h3>Быстрый аудит</h3>
+      <div class="simulation-lab-controls">
+        <button type="button" data-lab-audit="86400">24 ч</button>
+        <button type="button" data-lab-audit="172800">48 ч</button>
+        <button type="button" data-lab-audit="604800">7 дней</button>
+        <button type="button" data-lab-audit="2592000">30 дней</button>
+        <button type="button" id="simulation-lab-determinism">Тест детерминизма</button>
+      </div>
+      <div class="simulation-lab-status" id="simulation-lab-status">Выберите период аудита.</div>
+      <div class="simulation-lab-summary" id="simulation-lab-summary"></div>
+      <h3>Аномалии</h3><ul class="simulation-lab-anomalies" id="simulation-lab-anomalies"><li>Аудит ещё не запускался.</li></ul>
+      <h3>Статистика регионов</h3>
+      <div class="simulation-lab-table-wrap"><table id="simulation-lab-regions"><thead><tr><th>ID</th><th>Регион</th><th>Зона</th><th>Тревоги</th><th>Переходы</th><th>Жёлтый</th><th>Красный</th><th>Макс.</th><th>Активен</th></tr></thead><tbody></tbody></table></div>
+      <h3>Журнал событий</h3>
+      <div class="simulation-lab-table-wrap"><table id="simulation-lab-events"><thead><tr><th>UTC</th><th>Тип</th><th>Сектор</th><th>Сила</th><th>Глубина</th><th>Регионов</th></tr></thead><tbody></tbody></table></div>
+    </div>`;
+  document.body.append(lab);
+  lab.addEventListener("click", event => {
+    const speedButton = event.target.closest("[data-lab-speed]");
+    if (speedButton) setSimulationLabSpeed(Number(speedButton.dataset.labSpeed));
+    const jumpButton = event.target.closest("[data-lab-jump]");
+    if (jumpButton) setSimulationLabTime(simulationNow() + Number(jumpButton.dataset.labJump) * 60 * 60 * 1000);
+    const auditButton = event.target.closest("[data-lab-audit]");
+    if (auditButton) runSimulationLabAudit(Number(auditButton.dataset.labAudit));
+  });
+  document.querySelector("#simulation-lab-now").addEventListener("click", () => setSimulationLabTime(Date.now(), 1));
+  document.querySelector("#simulation-lab-determinism").addEventListener("click", () => {
+    const result = testSimulationDeterminism(30 * 24 * 60 * 60);
+    document.querySelector("#simulation-lab-status").textContent = result.passed
+      ? `Детерминизм подтверждён: ${result.samples} контрольных точек.`
+      : `Ошибка детерминизма на ${new Date(result.second * 1000).toISOString()}.`;
+  });
+  renderSimulationLabClock();
 }
 
 function setThreatsCollapsed(collapsed) {
@@ -1042,6 +1400,7 @@ setTheme(getTheme(), false);
 let savedThreatsCollapsed = false;
 try { savedThreatsCollapsed = localStorage.getItem(COLLAPSE_KEY) === "true"; } catch (_) {}
 setThreatsCollapsed(window.matchMedia("(max-width: 640px)").matches || savedThreatsCollapsed);
+initializeSimulationLab();
 updateSimulationIfNeeded();
 scheduleNextSimulationUpdate();
 setInterval(updateClock, 1000);
