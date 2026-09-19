@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=4">
+  <link rel="stylesheet" href="styles.css?v=5">
 </head>
 <body>
   <header class="app-header">
@@ -23,6 +23,7 @@
     </div>
 
     <nav class="header-actions" aria-label="Настройки отображения">
+      <button class="header-button" id="history-button" type="button">История</button>
       <button class="header-button" id="statistics-button" type="button">Статистика</button>
       <button class="header-button" id="theme-toggle" type="button" aria-pressed="false">Светлая тема</button>
     </nav>
@@ -69,6 +70,22 @@
     <div class="statistics-grid" id="statistics-grid"></div>
   </dialog>
 
-  <script src="app.js?v=4"></script>
+  <dialog class="history-dialog" id="history-dialog" aria-labelledby="history-title">
+    <div class="dialog-heading">
+      <div>
+        <p class="dialog-kicker">События за сегодня</p>
+        <h2 id="history-title">История</h2>
+      </div>
+      <button class="dialog-close" id="history-close" type="button" aria-label="Закрыть историю">Закрыть</button>
+    </div>
+    <div class="history-filters" role="group" aria-label="Фильтр истории">
+      <button class="history-filter active" type="button" data-history-filter="all" aria-pressed="true">Все</button>
+      <button class="history-filter" type="button" data-history-filter="red" aria-pressed="false">Красный уровень</button>
+      <button class="history-filter" type="button" data-history-filter="yellow" aria-pressed="false">Жёлтый уровень</button>
+    </div>
+    <div class="history-list" id="history-list" aria-live="polite"></div>
+  </dialog>
+
+  <script src="app.js?v=5"></script>
 </body>
 </html>

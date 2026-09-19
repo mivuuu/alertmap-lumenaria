@@ -210,9 +210,12 @@ const threatsPanel = document.querySelector("#threats-panel");
 const threatsToggle = document.querySelector("#threats-toggle");
 const themeToggle = document.querySelector("#theme-toggle");
 const statisticsDialog = document.querySelector("#statistics-dialog");
+const historyDialog = document.querySelector("#history-dialog");
 let currentStates = [];
 let mapDocument = null;
 let simulationCache = null;
+let historyCache = null;
+let historyFilter = "all";
 
 function hash32(a) {
   a |= 0; a = a + 0x7ed55d16 + (a << 12) | 0; a = (a ^ 0xc761c23c) ^ (a >>> 19);
@@ -417,56 +420,61 @@ function initialStates(cycleStart) {
   }));
 }
 
-function simulateStates(slot) {
-  if (simulationCache?.slot === slot) return simulationCache;
+function advanceSimulation(previousStates, slot, captureDebug = false) {
+  const states = {};
+  const debugRows = [];
+  const globalEvent = globalEventAt(slot);
+  for (const region of REGIONS) {
+    const previous = previousStates[region.id];
+    const modifiers = neighborModifiers(region.id, previousStates);
+    const probabilities = globalEvent.type === "calm"
+      ? { yellow: 0, red: 0 }
+      : transitionProbabilities(
+          region.id,
+          previous,
+          modifiers,
+          slot,
+          globalEventModifiers(region.id, globalEvent, slot)
+        );
+    const status = chooseStatus(region.id, slot, probabilities);
+    states[region.id] = {
+      status,
+      sinceSlot: status === previous.status ? previous.sinceSlot : slot,
+      alertSinceSlot: status === "clear"
+        ? null
+        : previous.status === "clear"
+          ? slot
+          : previous.alertSinceSlot
+    };
+    if (captureDebug) {
+      debugRows.push({
+        ID: region.id, name: region.name,
+        zone: REGION_RISK[region.id].zone,
+        yellowRisk: REGION_RISK[region.id].yellow,
+        redRisk: REGION_RISK[region.id].red,
+        previousState: previous.status,
+        neighborModifier: `Y ×${modifiers.yellow.toFixed(2)} / R ×${modifiers.red.toFixed(2)}`,
+        finalYellowChance: probabilities.yellow.toFixed(4),
+        finalRedChance: probabilities.red.toFixed(4),
+        currentState: status
+      });
+    }
+  }
+  return { states, globalEvent, debugRows };
+}
+
+function calculateSimulation(slot, captureDebug = false) {
   const cycleStart = slot - ((slot % CONFIG.historySlots) + CONFIG.historySlots) % CONFIG.historySlots;
   let states = initialStates(cycleStart);
+  let globalEvent = globalEventAt(cycleStart);
   let debugRows = [];
-  let currentGlobalEvent = globalEventAt(cycleStart);
   for (let currentSlot = cycleStart + 1; currentSlot <= slot; currentSlot++) {
-    const previousStates = states;
-    const nextStates = {};
-    const isFinalSlot = currentSlot === slot;
-    currentGlobalEvent = globalEventAt(currentSlot);
-    for (const region of REGIONS) {
-      const previous = previousStates[region.id];
-      const modifiers = neighborModifiers(region.id, previousStates);
-      const probabilities = currentGlobalEvent.type === "calm"
-        ? { yellow: 0, red: 0 }
-        : transitionProbabilities(
-            region.id,
-            previous,
-            modifiers,
-            currentSlot,
-            globalEventModifiers(region.id, currentGlobalEvent, currentSlot)
-          );
-      const status = chooseStatus(region.id, currentSlot, probabilities);
-      nextStates[region.id] = {
-        status,
-        sinceSlot: status === previous.status ? previous.sinceSlot : currentSlot,
-        alertSinceSlot: status === "clear"
-          ? null
-          : previous.status === "clear"
-            ? currentSlot
-            : previous.alertSinceSlot
-      };
-      if (isFinalSlot) {
-        debugRows.push({
-          ID: region.id, name: region.name,
-          zone: REGION_RISK[region.id].zone,
-          yellowRisk: REGION_RISK[region.id].yellow,
-          redRisk: REGION_RISK[region.id].red,
-          previousState: previous.status,
-          neighborModifier: `Y ×${modifiers.yellow.toFixed(2)} / R ×${modifiers.red.toFixed(2)}`,
-          finalYellowChance: probabilities.yellow.toFixed(4),
-          finalRedChance: probabilities.red.toFixed(4),
-          currentState: status
-        });
-      }
-    }
-    states = nextStates;
+    const step = advanceSimulation(states, currentSlot, captureDebug && currentSlot === slot);
+    states = step.states;
+    globalEvent = step.globalEvent;
+    if (step.debugRows.length) debugRows = step.debugRows;
   }
-  if (slot === cycleStart) {
+  if (captureDebug && slot === cycleStart) {
     debugRows = REGIONS.map(region => ({
       ID: region.id, name: region.name,
       zone: REGION_RISK[region.id].zone,
@@ -479,16 +487,22 @@ function simulateStates(slot) {
       currentState: states[region.id].status
     }));
   }
-  simulationCache = { slot, states };
+  return { slot, states, globalEvent, debugRows };
+}
+
+function simulateStates(slot) {
+  if (simulationCache?.slot === slot) return simulationCache;
+  const calculated = calculateSimulation(slot, DEBUG_SIMULATION);
+  simulationCache = { slot, states: calculated.states };
   if (DEBUG_SIMULATION) {
     console.table([{
-      globalEventType: currentGlobalEvent.type,
-      eventStartSlot: currentGlobalEvent.startSlot,
-      eventDurationMinutes: currentGlobalEvent.duration * CONFIG.slotMinutes,
-      waveIntensity: currentGlobalEvent.intensity.toFixed(2),
-      affectedDepth: currentGlobalEvent.affectedDepth
+      globalEventType: calculated.globalEvent.type,
+      eventStartSlot: calculated.globalEvent.startSlot,
+      eventDurationMinutes: calculated.globalEvent.duration * CONFIG.slotMinutes,
+      waveIntensity: calculated.globalEvent.intensity.toFixed(2),
+      affectedDepth: calculated.globalEvent.affectedDepth
     }]);
-    console.table(debugRows);
+    console.table(calculated.debugRows);
   }
   return simulationCache;
 }
@@ -520,6 +534,112 @@ function formatDuration(since) {
   if (days) return `${days} д ${hours} ч`;
   if (hours) return `${hours} ч ${minutes} мин`;
   return totalMinutes ? `${totalMinutes} мин` : "менее минуты";
+}
+
+function historyDayKey(ms) {
+  const date = new Date(ms);
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+}
+
+function historyDayStartSlot(ms) {
+  const date = new Date(ms);
+  date.setHours(0, 0, 0, 0);
+  return Math.floor(date.getTime() / (CONFIG.slotMinutes * 60 * 1000));
+}
+
+function createHistoryEvent(regionId, status, startSlot, endSlot = null) {
+  const region = REGIONS.find(item => item.id === regionId);
+  return { regionId, regionName: region.name, status, startSlot, endSlot };
+}
+
+function createHistoryCache(now) {
+  const startSlot = historyDayStartSlot(now);
+  const previousStates = calculateSimulation(startSlot - 1).states;
+  const openEvents = {};
+  for (const region of REGIONS) {
+    const state = previousStates[region.id];
+    if (state.status !== "clear") {
+      openEvents[region.id] = createHistoryEvent(region.id, state.status, state.sinceSlot);
+    }
+  }
+  return {
+    dayKey: historyDayKey(now),
+    throughSlot: startSlot - 1,
+    states: previousStates,
+    events: [],
+    openEvents
+  };
+}
+
+function advanceHistoryCache(targetSlot) {
+  for (let slot = historyCache.throughSlot + 1; slot <= targetSlot; slot++) {
+    const previousStates = historyCache.states;
+    const cycleOffset = ((slot % CONFIG.historySlots) + CONFIG.historySlots) % CONFIG.historySlots;
+    const nextStates = cycleOffset === 0 ? initialStates(slot) : advanceSimulation(previousStates, slot).states;
+    for (const region of REGIONS) {
+      const previous = previousStates[region.id];
+      const next = nextStates[region.id];
+      if (previous.status === next.status) continue;
+      if (previous.status !== "clear") {
+        const openEvent = historyCache.openEvents[region.id]
+          || createHistoryEvent(region.id, previous.status, previous.sinceSlot);
+        historyCache.events.push({ ...openEvent, endSlot: slot });
+        delete historyCache.openEvents[region.id];
+      }
+      if (next.status !== "clear") {
+        historyCache.openEvents[region.id] = createHistoryEvent(region.id, next.status, slot);
+      }
+    }
+    historyCache.states = nextStates;
+    historyCache.throughSlot = slot;
+  }
+}
+
+function ensureHistoryCache(now = Date.now()) {
+  if (!historyCache || historyCache.dayKey !== historyDayKey(now)) {
+    historyCache = createHistoryCache(now);
+  }
+  const targetSlot = Math.floor(now / (CONFIG.slotMinutes * 60 * 1000));
+  if (historyCache.throughSlot < targetSlot) advanceHistoryCache(targetSlot);
+  return historyCache;
+}
+
+function formatHistoryDuration(event, now) {
+  const slotMs = CONFIG.slotMinutes * 60 * 1000;
+  const start = event.startSlot * slotMs;
+  const end = event.endSlot === null ? now : event.endSlot * slotMs;
+  const totalMinutes = Math.max(0, Math.floor((end - start) / 60000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours) return `${hours} ч${minutes ? ` ${minutes} мин` : ""}`;
+  return totalMinutes ? `${totalMinutes} мин` : "менее минуты";
+}
+
+function historyEvents() {
+  const ongoing = Object.values(historyCache.openEvents).map(event => ({ ...event, endSlot: null }));
+  return [...historyCache.events, ...ongoing]
+    .filter(event => historyFilter === "all" || event.status === historyFilter)
+    .sort((a, b) => b.startSlot - a.startSlot || b.regionId - a.regionId);
+}
+
+function renderHistory(now = Date.now()) {
+  ensureHistoryCache(now);
+  const slotMs = CONFIG.slotMinutes * 60 * 1000;
+  const events = historyEvents();
+  document.querySelector("#history-list").innerHTML = events.length ? events.map(event => {
+    const startTime = formatTime(event.startSlot * slotMs);
+    const endTime = event.endSlot === null ? "сейчас" : formatTime(event.endSlot * slotMs);
+    const ongoing = event.endSlot === null ? ' <span class="history-ongoing">· продолжается</span>' : "";
+    return `
+      <div class="history-item ${event.status}">
+        <span class="history-bar" aria-hidden="true"></span>
+        <span>
+          <span class="history-region">${event.regionId} — ${event.regionName}</span>
+          <span class="history-level">${STATUS[event.status].label}</span>
+          <span class="history-time">${startTime}–${endTime} · ${formatHistoryDuration(event, now)}${ongoing}</span>
+        </span>
+      </div>`;
+  }).join("") : '<div class="empty-history">За сегодня событий нет.</div>';
 }
 
 function getTheme() {
@@ -623,6 +743,7 @@ function render() {
   renderMap();
   renderThreats();
   renderStatistics();
+  if (historyDialog.open) renderHistory(now);
   updateClock();
 }
 
@@ -696,6 +817,25 @@ document.querySelector("#statistics-button").addEventListener("click", () => sta
 document.querySelector("#statistics-close").addEventListener("click", () => statisticsDialog.close());
 statisticsDialog.addEventListener("click", event => {
   if (event.target === statisticsDialog) statisticsDialog.close();
+});
+document.querySelector("#history-button").addEventListener("click", () => {
+  renderHistory();
+  historyDialog.showModal();
+});
+document.querySelector("#history-close").addEventListener("click", () => historyDialog.close());
+historyDialog.addEventListener("click", event => {
+  if (event.target === historyDialog) historyDialog.close();
+});
+document.querySelector(".history-filters").addEventListener("click", event => {
+  const button = event.target.closest("[data-history-filter]");
+  if (!button) return;
+  historyFilter = button.dataset.historyFilter;
+  document.querySelectorAll("[data-history-filter]").forEach(item => {
+    const active = item === button;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-pressed", String(active));
+  });
+  renderHistory();
 });
 
 mapObject.addEventListener("load", bindMap);
