@@ -124,6 +124,15 @@ const ALERT_DURATION_BY_DEPTH = {
   5: [8 * 60, 25 * 60]
 };
 
+const MAX_SAME_STATE_DURATION_BY_DEPTH = {
+  0: [10 * 60, 20 * 60],
+  1: [8 * 60, 15 * 60],
+  2: [7 * 60, 12 * 60],
+  3: [5 * 60, 10 * 60],
+  4: [5 * 60, 10 * 60],
+  5: [5 * 60, 10 * 60]
+};
+
 const DEBUG_SIMULATION = false;
 
 const STATUS = {
@@ -218,6 +227,7 @@ function eventRange(eventIndex, salt, minimum, maximum, regionId = 0, extra = 0)
 
 const eventCache = new Map();
 const eventEffectsCache = new Map();
+const alertEpisodesCache = new WeakMap();
 const DEEP_TARGET_IDS = REGIONS
   .filter(region => EVENT_DEPTH_BY_ZONE[REGION_RISK[region.id].zone] >= 3)
   .map(region => region.id);
@@ -391,22 +401,113 @@ function effectsForAttackEvent(event) {
   return effects;
 }
 
+function alertEpisodesForEvents(events) {
+  if (alertEpisodesCache.has(events)) return alertEpisodesCache.get(events);
+  const intervalsByRegion = new Map(REGIONS.map(region => [region.id, []]));
+  for (const event of events) {
+    if (event.type === "calm") continue;
+    for (const effect of effectsForAttackEvent(event)) {
+      intervalsByRegion.get(effect.regionId).push({ startedAt: effect.startedAt, endsAt: effect.endsAt });
+    }
+  }
+
+  const episodesByRegion = new Map();
+  for (const region of REGIONS) {
+    const intervals = intervalsByRegion.get(region.id).sort((a, b) => a.startedAt - b.startedAt);
+    const episodes = [];
+    for (const interval of intervals) {
+      const previous = episodes.at(-1);
+      if (previous && interval.startedAt <= previous.endsAt) {
+        previous.endsAt = Math.max(previous.endsAt, interval.endsAt);
+      } else {
+        episodes.push({ ...interval });
+      }
+    }
+    episodesByRegion.set(region.id, episodes);
+  }
+  alertEpisodesCache.set(events, episodesByRegion);
+  return episodesByRegion;
+}
+
+function sameStatePhaseDuration(regionId, episodeStartedAt, phaseIndex) {
+  const depth = EVENT_DEPTH_BY_ZONE[REGION_RISK[regionId].zone];
+  const [minimumDuration, maximumDuration] = MAX_SAME_STATE_DURATION_BY_DEPTH[depth];
+  return eventRange(
+    episodeStartedAt, 0x27a4cd91, minimumDuration, maximumDuration, regionId, phaseIndex
+  );
+}
+
+function sameStatePhasesForEpisode(regionId, episode) {
+  if (episode.sameStatePhases) return episode.sameStatePhases;
+  const phases = [];
+  let cursor = episode.startedAt;
+  let phaseIndex = 0;
+  while (cursor < episode.endsAt) {
+    const endsAt = Math.min(
+      episode.endsAt,
+      cursor + sameStatePhaseDuration(regionId, episode.startedAt, phaseIndex)
+    );
+    phases.push({ phaseIndex, startedAt: cursor, endsAt });
+    cursor = endsAt;
+    phaseIndex++;
+  }
+  episode.sameStatePhases = phases;
+  return phases;
+}
+
+function sameStatePhaseAt(regionId, second, episode) {
+  const phases = sameStatePhasesForEpisode(regionId, episode);
+  let low = 0;
+  let high = phases.length - 1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const phase = phases[middle];
+    if (second < phase.startedAt) high = middle - 1;
+    else if (second >= phase.endsAt) low = middle + 1;
+    else return phase;
+  }
+  return null;
+}
+
+function addSameStateBoundaries(boundaries, events, startSecond, endSecond) {
+  const episodesByRegion = alertEpisodesForEvents(events);
+  for (const region of REGIONS) {
+    for (const episode of episodesByRegion.get(region.id)) {
+      if (episode.endsAt < startSecond || episode.startedAt > endSecond) continue;
+      for (const phase of sameStatePhasesForEpisode(region.id, episode)) {
+        if (phase.endsAt >= startSecond && phase.endsAt <= endSecond) boundaries.add(phase.endsAt);
+      }
+    }
+  }
+}
+
+function applyMaxSameStateDuration(regionId, second, rawStatus, events) {
+  if (rawStatus === "clear") return "clear";
+  const episode = alertEpisodesForEvents(events).get(regionId)
+    .find(item => second >= item.startedAt && second < item.endsAt);
+  const sameStatePhase = episode && sameStatePhaseAt(regionId, second, episode);
+  if (!sameStatePhase) return rawStatus;
+  const depth = EVENT_DEPTH_BY_ZONE[REGION_RISK[regionId].zone];
+  if (depth >= 3) return sameStatePhase.phaseIndex % 2 === 0 ? rawStatus : "clear";
+  return sameStatePhase.phaseIndex % 2 === 0 ? "yellow" : "red";
+}
+
 function activeCalmEvent(second, events) {
   return events.find(event => event.type === "calm" && second >= event.startedAt && second < event.endsAt) || null;
 }
 
 function eventDrivenRegionStatus(regionId, second, events) {
   if (activeCalmEvent(second, events)) return "clear";
-  let status = "clear";
+  let rawStatus = "clear";
   for (const event of events) {
     if (event.type === "calm") continue;
     const effect = effectsForAttackEvent(event).find(item => item.regionId === regionId);
     if (!effect || second < effect.startedAt || second >= effect.endsAt) continue;
     const phase = effect.phases.find(item => second >= item.startedAt && second < item.endsAt);
-    if (phase?.status === "red") return "red";
-    if (phase?.status === "yellow") status = "yellow";
+    if (phase?.status === "red") rawStatus = "red";
+    if (phase?.status === "yellow" && rawStatus !== "red") rawStatus = "yellow";
   }
-  return status;
+  return applyMaxSameStateDuration(regionId, second, rawStatus, events);
 }
 
 function attackEventBoundaries(events, startSecond, endSecond) {
@@ -424,6 +525,7 @@ function attackEventBoundaries(events, startSecond, endSecond) {
       }
     }
   }
+  addSameStateBoundaries(boundaries, events, startSecond, endSecond);
   return [...boundaries].sort((a, b) => a - b);
 }
 
@@ -1059,6 +1161,7 @@ function auditEventDrivenSimulation(durationSeconds) {
   const loggedEvents = events.filter(event => event.startedAt >= startSecond && event.startedAt < endSecond);
   const counts = Object.fromEntries(REGIONS.map(region => [region.id, { yellow: 0, red: 0 }]));
   const statuses = Object.fromEntries(REGIONS.map(region => [region.id, "clear"]));
+  const stateSince = Object.fromEntries(REGIONS.map(region => [region.id, startSecond]));
   const statistics = Object.fromEntries(REGIONS.map(region => [region.id, {
     yellowSeconds: 0,
     redSeconds: 0,
@@ -1113,15 +1216,21 @@ function auditEventDrivenSimulation(durationSeconds) {
     }
   }
 
-  function statusFromCounts(regionId) {
+  const sameStateBoundaries = new Set();
+  addSameStateBoundaries(sameStateBoundaries, events, startSecond, endSecond);
+  for (const boundary of sameStateBoundaries) {
+    if (boundary > startSecond && boundary <= endSecond) createAuditDelta(deltas, boundary);
+  }
+
+  function statusFromCounts(regionId, second) {
     if (calmCount > 0) return "clear";
-    if (counts[regionId].red > 0) return "red";
-    if (counts[regionId].yellow > 0) return "yellow";
-    return "clear";
+    const rawStatus = counts[regionId].red > 0 ? "red"
+      : counts[regionId].yellow > 0 ? "yellow" : "clear";
+    return applyMaxSameStateDuration(regionId, second, rawStatus, events);
   }
 
   for (const region of REGIONS) {
-    statuses[region.id] = statusFromCounts(region.id);
+    statuses[region.id] = statusFromCounts(region.id, startSecond);
     if (statuses[region.id] !== "clear") {
       statistics[region.id].alerts = 1;
       statistics[region.id].activeSince = startSecond;
@@ -1149,8 +1258,15 @@ function auditEventDrivenSimulation(durationSeconds) {
     let simultaneousChanges = 0;
     for (const region of REGIONS) {
       const previousStatus = statuses[region.id];
-      const status = statusFromCounts(region.id);
+      const status = statusFromCounts(region.id, second);
       if (status === previousStatus) continue;
+      if (previousStatus !== "clear") {
+        const depth = EVENT_DEPTH_BY_ZONE[REGION_RISK[region.id].zone];
+        const maximumSameState = MAX_SAME_STATE_DURATION_BY_DEPTH[depth][1];
+        if (second - stateSince[region.id] > maximumSameState) {
+          anomalies.push(`Регион ${region.id}: состояние ${previousStatus} не менялось слишком долго`);
+        }
+      }
       simultaneousChanges++;
       statistics[region.id].transitions++;
       if (previousStatus === "clear" && status !== "clear") {
@@ -1162,6 +1278,7 @@ function auditEventDrivenSimulation(durationSeconds) {
         statistics[region.id].activeSince = null;
       }
       statuses[region.id] = status;
+      stateSince[region.id] = second;
     }
     if (calmCount === 0 && delta.calm === 0) {
       maxSimultaneousOutsideCalm = Math.max(maxSimultaneousOutsideCalm, simultaneousChanges);
@@ -1179,6 +1296,13 @@ function auditEventDrivenSimulation(durationSeconds) {
     }
   }
   for (const region of REGIONS) {
+    if (statuses[region.id] !== "clear") {
+      const depth = EVENT_DEPTH_BY_ZONE[REGION_RISK[region.id].zone];
+      const maximumSameState = MAX_SAME_STATE_DURATION_BY_DEPTH[depth][1];
+      if (endSecond - stateSince[region.id] > maximumSameState) {
+        anomalies.push(`Регион ${region.id}: состояние ${statuses[region.id]} не менялось слишком долго`);
+      }
+    }
     if (statistics[region.id].activeSince !== null) {
       statistics[region.id].longestSeconds = Math.max(
         statistics[region.id].longestSeconds,
