@@ -115,56 +115,56 @@ const NEIGHBOR_INFLUENCE_BY_ZONE = {
   "remote island": 0
 };
 
-// Durations are expressed in five-minute slots. A state can last beyond its
+// Durations are expressed in minutes. A state can last beyond its
 // target, but every continuous alert episode has a deterministic hard limit.
 const PERSISTENCE_BY_ZONE = {
   "very deep rear": {
-    yellow: [2, 7], red: [3, 9], maxAlertSlots: 24,
+    yellow: [10, 35], red: [15, 45], maxAlertMinutes: 120,
     afterYellow: { yellow: 0.20, red: 0.08 },
     afterRed: { yellow: 0.64, red: 0.07 }
   },
   "remote island": {
-    yellow: [2, 7], red: [3, 9], maxAlertSlots: 24,
+    yellow: [10, 35], red: [15, 45], maxAlertMinutes: 120,
     afterYellow: { yellow: 0.20, red: 0.08 },
     afterRed: { yellow: 0.64, red: 0.07 }
   },
   "deep rear": {
-    yellow: [2, 7], red: [3, 9], maxAlertSlots: 24,
+    yellow: [10, 35], red: [15, 45], maxAlertMinutes: 120,
     afterYellow: { yellow: 0.20, red: 0.10 },
     afterRed: { yellow: 0.65, red: 0.07 }
   },
   "deep rear / middle depth": {
-    yellow: [3, 9], red: [4, 12], maxAlertSlots: 36,
+    yellow: [15, 45], red: [20, 60], maxAlertMinutes: 180,
     afterYellow: { yellow: 0.24, red: 0.18 },
     afterRed: { yellow: 0.64, red: 0.12 }
   },
   "middle depth": {
-    yellow: [3, 9], red: [4, 12], maxAlertSlots: 36,
+    yellow: [15, 45], red: [20, 60], maxAlertMinutes: 180,
     afterYellow: { yellow: 0.25, red: 0.23 },
     afterRed: { yellow: 0.62, red: 0.16 }
   },
   "middle depth / capital": {
-    yellow: [3, 9], red: [4, 12], maxAlertSlots: 36,
+    yellow: [15, 45], red: [20, 60], maxAlertMinutes: 180,
     afterYellow: { yellow: 0.25, red: 0.23 },
     afterRed: { yellow: 0.62, red: 0.16 }
   },
   "near-front": {
-    yellow: [5, 14], red: [6, 18], maxAlertSlots: 72,
+    yellow: [25, 70], red: [30, 90], maxAlertMinutes: 360,
     afterYellow: { yellow: 0.38, red: 0.40 },
     afterRed: { yellow: 0.55, red: 0.33 }
   },
   "near-front / operational rear": {
-    yellow: [5, 14], red: [6, 18], maxAlertSlots: 72,
+    yellow: [25, 70], red: [30, 90], maxAlertMinutes: 360,
     afterYellow: { yellow: 0.38, red: 0.40 },
     afterRed: { yellow: 0.55, red: 0.33 }
   },
   "frontline": {
-    yellow: [12, 48], red: [12, 54], maxAlertSlots: 144,
+    yellow: [60, 240], red: [60, 270], maxAlertMinutes: 720,
     afterYellow: { yellow: 0.44, red: 0.50 },
     afterRed: { yellow: 0.55, red: 0.41 }
   },
   "frontline / southern frontline": {
-    yellow: [12, 48], red: [12, 54], maxAlertSlots: 144,
+    yellow: [60, 240], red: [60, 270], maxAlertMinutes: 720,
     afterYellow: { yellow: 0.44, red: 0.50 },
     afterRed: { yellow: 0.55, red: 0.41 }
   }
@@ -178,21 +178,26 @@ const STATUS = {
   red: { label: "Красный уровень", color: "#D84C4C", cssVariable: "--status-red" }
 };
 
-// Base simulation settings. One time slot lasts five minutes.
+// Base probabilities remain calibrated to a five-minute interval.
 const CONFIG = {
-  slotMinutes: 5,
+  baseChanceMinutes: 5,
+  cadenceMinutes: {
+    clear: [1, 7],
+    yellow: [1, 6],
+    red: [2, 8]
+  },
   chances: {
     yellow: 0.07,
     red: 0.01
   },
   neighborModifierCap: 1.45,
   probabilityCap: 0.92,
-  historySlots: 7 * 24 * 12,
+  historyMinutes: 7 * 24 * 60,
   seed: 217031
 };
 
 const GLOBAL_EVENT_CONFIG = {
-  blockSlots: 24,
+  blockMinutes: 120,
   calmChance: 0.20,
   largeAttackChance: 0.12,
   waveChance: 0.36
@@ -229,20 +234,16 @@ let simulationCache = null;
 let historyCache = null;
 let historyFilter = "all";
 let dailyStatisticsCache = null;
-let notificationSlot = null;
+let notificationMinute = null;
 let notificationStates = null;
-let lastSimulationSlot = null;
+let lastSimulationMinute = null;
+let simulationUpdateTimer = null;
 const renderedMapStatuses = new Map();
 
 function hash32(a) {
   a |= 0; a = a + 0x7ed55d16 + (a << 12) | 0; a = (a ^ 0xc761c23c) ^ (a >>> 19);
   a = a + 0x165667b1 + (a << 5) | 0; a = (a + 0xd3a2646c) ^ (a << 9);
   a = a + 0xfd7046c5 + (a << 3) | 0; return ((a ^ 0xb55a4f09) ^ (a >>> 16)) >>> 0;
-}
-
-function deterministicRoll(regionId, slot, salt = 0) {
-  const mixed = hash32(CONFIG.seed ^ hash32(regionId * 1009) ^ hash32(slot * 7919) ^ salt);
-  return mixed / 4294967296;
 }
 
 function deterministicGlobalRoll(block, salt) {
@@ -261,20 +262,20 @@ function scheduledGlobalEvent(block) {
   }
 
   if (type === "normal") return null;
-  const startSlot = block * GLOBAL_EVENT_CONFIG.blockSlots
-    + Math.floor(deterministicGlobalRoll(block, 0x749ea2d3) * GLOBAL_EVENT_CONFIG.blockSlots);
+  const startMinute = block * GLOBAL_EVENT_CONFIG.blockMinutes
+    + Math.floor(deterministicGlobalRoll(block, 0x749ea2d3) * GLOBAL_EVENT_CONFIG.blockMinutes);
   const durationRoll = deterministicGlobalRoll(block, 0x1b56c4e9);
   let duration;
   let affectedDepth = 0;
   if (type === "calm") {
     duration = durationRoll < 0.82
-      ? 1 + Math.floor(durationRoll / 0.82 * 4)
-      : 5 + Math.floor((durationRoll - 0.82) / 0.18 * 2);
+      ? 5 + Math.floor(durationRoll / 0.82 * 16)
+      : 21 + Math.floor((durationRoll - 0.82) / 0.18 * 10);
   } else if (type === "wave") {
-    duration = 5 + Math.floor(durationRoll * 8);
+    duration = 25 + Math.floor(durationRoll * 36);
     affectedDepth = deterministicGlobalRoll(block, 0x6937af11) < 0.68 ? 1 : 2;
   } else {
-    duration = 8 + Math.floor(durationRoll * 11);
+    duration = 40 + Math.floor(durationRoll * 51);
     const depthRoll = deterministicGlobalRoll(block, 0x6937af11);
     affectedDepth = depthRoll < 0.55 ? 1 : depthRoll < 0.88 ? 2 : depthRoll < 0.97 ? 3 : 4;
   }
@@ -282,7 +283,7 @@ function scheduledGlobalEvent(block) {
   const anchorIndex = Math.floor(deterministicGlobalRoll(block, 0x5bc20a6f) * FRONTLINE_REGION_IDS.length);
   return {
     type,
-    startSlot,
+    startMinute,
     duration,
     intensity: type === "calm" ? 0 : 0.75 + deterministicGlobalRoll(block, 0x78f2d14b) * 0.50,
     affectedDepth,
@@ -290,15 +291,15 @@ function scheduledGlobalEvent(block) {
   };
 }
 
-function globalEventAt(slot) {
-  const block = Math.floor(slot / GLOBAL_EVENT_CONFIG.blockSlots);
+function globalEventAt(minute) {
+  const block = Math.floor(minute / GLOBAL_EVENT_CONFIG.blockMinutes);
   const candidates = [scheduledGlobalEvent(block - 1), scheduledGlobalEvent(block)]
-    .filter(event => event && slot >= event.startSlot && slot < event.startSlot + event.duration);
+    .filter(event => event && minute >= event.startMinute && minute < event.startMinute + event.duration);
   if (!candidates.length) {
-    return { type: "normal", startSlot: null, duration: 0, intensity: 0, affectedDepth: 0 };
+    return { type: "normal", startMinute: null, duration: 0, intensity: 0, affectedDepth: 0 };
   }
   const priority = { calm: 3, large_attack: 2, wave: 1 };
-  return candidates.sort((a, b) => priority[b.type] - priority[a.type] || b.startSlot - a.startSlot)[0];
+  return candidates.sort((a, b) => priority[b.type] - priority[a.type] || b.startMinute - a.startMinute)[0];
 }
 
 const regionDistanceCache = new Map();
@@ -325,9 +326,9 @@ function regionDistance(originId, targetId) {
   return Infinity;
 }
 
-function globalEventModifiers(regionId, event, slot) {
+function globalEventModifiers(regionId, event, minute) {
   if (event.type === "normal" || event.type === "calm") return { yellow: 1, red: 1 };
-  const progress = (slot - event.startSlot) / Math.max(1, event.duration - 1);
+  const progress = (minute - event.startMinute) / Math.max(1, event.duration - 1);
   const fade = Math.max(0, 1 - progress);
 
   if (event.type === "wave") {
@@ -379,89 +380,185 @@ function neighborModifiers(regionId, previousStates) {
 function stateDurationTarget(regionId, state, profile) {
   const [minimum, maximum] = profile[state.status];
   const salt = state.status === "yellow" ? 0x4f1bbcdc : 0x2c9277b5;
-  const roll = deterministicRoll(regionId, state.sinceSlot, salt);
+  const roll = deterministicEventRoll(regionId, state.stateStartedIndex, state.sinceMinute, state.status, salt);
   return minimum + Math.floor(roll * (maximum - minimum + 1));
 }
 
-function transitionProbabilities(regionId, previousState, modifiers, slot, eventModifiers = { yellow: 1, red: 1 }) {
+function deterministicEventRoll(regionId, eventIndex, minute, status, salt = 0) {
+  const statusSalt = status === "red" ? 0x63d83595 : status === "yellow" ? 0x3f84d5b5 : 0x1b873593;
+  const mixed = hash32(
+    CONFIG.seed
+    ^ hash32(regionId * 1009)
+    ^ hash32(eventIndex * 7919)
+    ^ hash32(minute * 104729)
+    ^ statusSalt
+    ^ salt
+  );
+  return mixed / 4294967296;
+}
+
+function nextEventInterval(regionId, eventIndex, minute, status) {
+  const [minimum, maximum] = CONFIG.cadenceMinutes[status];
+  const roll = deterministicEventRoll(regionId, eventIndex, minute, status, 0x51ed270b);
+  return minimum + Math.floor(roll * (maximum - minimum + 1));
+}
+
+function scaleProbabilitiesForInterval(probabilities, previousStatus, elapsedMinutes) {
+  const stayProbability = previousStatus === "clear"
+    ? 1 - probabilities.yellow - probabilities.red
+    : probabilities[previousStatus];
+  const scaledStay = Math.max(0, Math.min(1, stayProbability)) ** (elapsedMinutes / CONFIG.baseChanceMinutes);
+  const originalExit = Math.max(0, 1 - stayProbability);
+  if (originalExit === 0) {
+    return previousStatus === "red" ? { yellow: 0, red: 1 }
+      : previousStatus === "yellow" ? { yellow: 1, red: 0 }
+        : { yellow: 0, red: 0 };
+  }
+  const scaledExit = 1 - scaledStay;
+
+  if (previousStatus === "clear") {
+    return {
+      yellow: scaledExit * probabilities.yellow / originalExit,
+      red: scaledExit * probabilities.red / originalExit
+    };
+  }
+  if (previousStatus === "yellow") {
+    const redShare = probabilities.red / originalExit;
+    return { yellow: scaledStay, red: scaledExit * redShare };
+  }
+  const yellowShare = probabilities.yellow / originalExit;
+  return { yellow: scaledExit * yellowShare, red: scaledStay };
+}
+
+function transitionProbabilities(regionId, previousState, modifiers, minute, eventModifiers = { yellow: 1, red: 1 }) {
   const risk = REGION_RISK[regionId];
   const baseYellow = CONFIG.chances.yellow * risk.yellow * modifiers.yellow * eventModifiers.yellow;
   const baseRed = CONFIG.chances.red * risk.red * modifiers.red * eventModifiers.red;
+  const elapsedMinutes = Math.max(1, minute - previousState.lastCheckMinute);
   if (previousState.status === "clear") {
-    return {
+    return scaleProbabilitiesForInterval({
       yellow: Math.min(0.24, baseYellow),
       red: Math.min(0.035, baseRed * 0.45)
-    };
+    }, "clear", elapsedMinutes);
   }
 
   const profile = PERSISTENCE_BY_ZONE[risk.zone];
-  const alertSinceSlot = previousState.alertSinceSlot ?? previousState.sinceSlot;
-  if (slot - alertSinceSlot >= profile.maxAlertSlots) return { yellow: 0, red: 0 };
+  const alertSinceMinute = previousState.alertSinceMinute ?? previousState.sinceMinute;
+  if (minute - alertSinceMinute >= profile.maxAlertMinutes) return { yellow: 0, red: 0 };
 
-  const stateAge = slot - previousState.sinceSlot;
+  const stateAge = minute - previousState.sinceMinute;
   if (stateAge < stateDurationTarget(regionId, previousState, profile)) {
     return previousState.status === "yellow"
       ? { yellow: 1, red: 0 }
       : { yellow: 0, red: 1 };
   }
 
-  return previousState.status === "yellow" ? profile.afterYellow : profile.afterRed;
+  return scaleProbabilitiesForInterval(
+    previousState.status === "yellow" ? profile.afterYellow : profile.afterRed,
+    previousState.status,
+    elapsedMinutes
+  );
 }
 
-function chooseStatus(regionId, slot, probabilities) {
-  const roll = deterministicRoll(regionId, slot, 0x6d2b79f5);
+function chooseStatus(regionId, minute, eventIndex, previousStatus, probabilities) {
+  const roll = deterministicEventRoll(regionId, eventIndex, minute, previousStatus, 0x6d2b79f5);
   if (roll < probabilities.red) return "red";
   if (roll < probabilities.red + probabilities.yellow) return "yellow";
   return "clear";
 }
 
-function initialStates(cycleStart) {
-  const event = globalEventAt(cycleStart);
+function initialStates(cycleStartMinute) {
+  const event = globalEventAt(cycleStartMinute);
   return Object.fromEntries(REGIONS.map(region => {
-    const clearState = { status: "clear", sinceSlot: cycleStart, alertSinceSlot: null };
+    const clearState = {
+      status: "clear",
+      sinceMinute: cycleStartMinute,
+      alertSinceMinute: null,
+      lastCheckMinute: cycleStartMinute - CONFIG.baseChanceMinutes,
+      nextCheckMinute: cycleStartMinute,
+      eventIndex: 0,
+      stateStartedIndex: 0
+    };
     const probabilities = event.type === "calm"
       ? { yellow: 0, red: 0 }
       : transitionProbabilities(
           region.id,
           clearState,
           { yellow: 1, red: 1 },
-          cycleStart,
-          globalEventModifiers(region.id, event, cycleStart)
+          cycleStartMinute,
+          globalEventModifiers(region.id, event, cycleStartMinute)
         );
-    const status = chooseStatus(region.id, cycleStart, probabilities);
+    const status = chooseStatus(region.id, cycleStartMinute, 0, "clear", probabilities);
+    const eventIndex = 1;
     return [region.id, {
       status,
-      sinceSlot: cycleStart,
-      alertSinceSlot: status === "clear" ? null : cycleStart
+      sinceMinute: cycleStartMinute,
+      alertSinceMinute: status === "clear" ? null : cycleStartMinute,
+      lastCheckMinute: cycleStartMinute,
+      nextCheckMinute: cycleStartMinute + nextEventInterval(region.id, eventIndex, cycleStartMinute, status),
+      eventIndex,
+      stateStartedIndex: eventIndex
     }];
   }));
 }
 
-function advanceSimulation(previousStates, slot, captureDebug = false) {
+function advanceSimulation(previousStates, minute, captureDebug = false) {
   const states = {};
   const debugRows = [];
-  const globalEvent = globalEventAt(slot);
+  const globalEvent = globalEventAt(minute);
   for (const region of REGIONS) {
     const previous = previousStates[region.id];
+    if (globalEvent.type === "calm") {
+      const calmEndMinute = globalEvent.startMinute + globalEvent.duration;
+      if (previous.status !== "clear") {
+        const eventIndex = previous.eventIndex + 1;
+        states[region.id] = {
+          status: "clear",
+          sinceMinute: minute,
+          alertSinceMinute: null,
+          lastCheckMinute: minute,
+          nextCheckMinute: calmEndMinute + nextEventInterval(region.id, eventIndex, calmEndMinute, "clear"),
+          eventIndex,
+          stateStartedIndex: eventIndex
+        };
+      } else if (previous.nextCheckMinute <= calmEndMinute) {
+        states[region.id] = {
+          ...previous,
+          nextCheckMinute: calmEndMinute + nextEventInterval(region.id, previous.eventIndex, calmEndMinute, "clear")
+        };
+      } else {
+        states[region.id] = previous;
+      }
+      continue;
+    }
+
+    if (minute < previous.nextCheckMinute) {
+      states[region.id] = previous;
+      continue;
+    }
+
     const modifiers = neighborModifiers(region.id, previousStates);
-    const probabilities = globalEvent.type === "calm"
-      ? { yellow: 0, red: 0 }
-      : transitionProbabilities(
-          region.id,
-          previous,
-          modifiers,
-          slot,
-          globalEventModifiers(region.id, globalEvent, slot)
-        );
-    const status = chooseStatus(region.id, slot, probabilities);
+    const probabilities = transitionProbabilities(
+      region.id,
+      previous,
+      modifiers,
+      minute,
+      globalEventModifiers(region.id, globalEvent, minute)
+    );
+    const status = chooseStatus(region.id, minute, previous.eventIndex, previous.status, probabilities);
+    const eventIndex = previous.eventIndex + 1;
     states[region.id] = {
       status,
-      sinceSlot: status === previous.status ? previous.sinceSlot : slot,
-      alertSinceSlot: status === "clear"
+      sinceMinute: status === previous.status ? previous.sinceMinute : minute,
+      alertSinceMinute: status === "clear"
         ? null
         : previous.status === "clear"
-          ? slot
-          : previous.alertSinceSlot
+          ? minute
+          : previous.alertSinceMinute,
+      lastCheckMinute: minute,
+      nextCheckMinute: minute + nextEventInterval(region.id, eventIndex, minute, status),
+      eventIndex,
+      stateStartedIndex: status === previous.status ? previous.stateStartedIndex : eventIndex
     };
     if (captureDebug) {
       debugRows.push({
@@ -473,25 +570,26 @@ function advanceSimulation(previousStates, slot, captureDebug = false) {
         neighborModifier: `Y ×${modifiers.yellow.toFixed(2)} / R ×${modifiers.red.toFixed(2)}`,
         finalYellowChance: probabilities.yellow.toFixed(4),
         finalRedChance: probabilities.red.toFixed(4),
-        currentState: status
+        currentState: status,
+        nextCheckMinute: states[region.id].nextCheckMinute
       });
     }
   }
   return { states, globalEvent, debugRows };
 }
 
-function calculateSimulation(slot, captureDebug = false) {
-  const cycleStart = slot - ((slot % CONFIG.historySlots) + CONFIG.historySlots) % CONFIG.historySlots;
+function calculateSimulation(minute, captureDebug = false) {
+  const cycleStart = minute - ((minute % CONFIG.historyMinutes) + CONFIG.historyMinutes) % CONFIG.historyMinutes;
   let states = initialStates(cycleStart);
   let globalEvent = globalEventAt(cycleStart);
   let debugRows = [];
-  for (let currentSlot = cycleStart + 1; currentSlot <= slot; currentSlot++) {
-    const step = advanceSimulation(states, currentSlot, captureDebug && currentSlot === slot);
+  for (let currentMinute = cycleStart + 1; currentMinute <= minute; currentMinute++) {
+    const step = advanceSimulation(states, currentMinute, captureDebug && currentMinute === minute);
     states = step.states;
     globalEvent = step.globalEvent;
     if (step.debugRows.length) debugRows = step.debugRows;
   }
-  if (captureDebug && slot === cycleStart) {
+  if (captureDebug && minute === cycleStart) {
     debugRows = REGIONS.map(region => ({
       ID: region.id, name: region.name,
       zone: REGION_RISK[region.id].zone,
@@ -504,18 +602,31 @@ function calculateSimulation(slot, captureDebug = false) {
       currentState: states[region.id].status
     }));
   }
-  return { slot, states, globalEvent, debugRows };
+  return { minute, states, globalEvent, debugRows };
 }
 
-function simulateStates(slot) {
-  if (simulationCache?.slot === slot) return simulationCache;
-  const calculated = calculateSimulation(slot, DEBUG_SIMULATION);
-  simulationCache = { slot, states: calculated.states };
+function simulateStates(minute) {
+  if (simulationCache?.minute === minute) return simulationCache;
+  const cycleStart = minute - ((minute % CONFIG.historyMinutes) + CONFIG.historyMinutes) % CONFIG.historyMinutes;
+  let calculated;
+  if (!DEBUG_SIMULATION && simulationCache && simulationCache.minute < minute && simulationCache.minute >= cycleStart) {
+    let states = simulationCache.states;
+    let globalEvent = globalEventAt(simulationCache.minute);
+    for (let currentMinute = simulationCache.minute + 1; currentMinute <= minute; currentMinute++) {
+      const step = advanceSimulation(states, currentMinute);
+      states = step.states;
+      globalEvent = step.globalEvent;
+    }
+    calculated = { minute, states, globalEvent, debugRows: [] };
+  } else {
+    calculated = calculateSimulation(minute, DEBUG_SIMULATION);
+  }
+  simulationCache = { minute, states: calculated.states };
   if (DEBUG_SIMULATION) {
     console.table([{
       globalEventType: calculated.globalEvent.type,
-      eventStartSlot: calculated.globalEvent.startSlot,
-      eventDurationMinutes: calculated.globalEvent.duration * CONFIG.slotMinutes,
+      eventStartMinute: calculated.globalEvent.startMinute,
+      eventDurationMinutes: calculated.globalEvent.duration,
       waveIntensity: calculated.globalEvent.intensity.toFixed(2),
       affectedDepth: calculated.globalEvent.affectedDepth
     }]);
@@ -558,57 +669,57 @@ function historyDayKey(ms) {
   return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
 }
 
-function historyDayStartSlot(ms) {
+function historyDayStartMinute(ms) {
   const date = new Date(ms);
   date.setHours(0, 0, 0, 0);
-  return Math.floor(date.getTime() / (CONFIG.slotMinutes * 60 * 1000));
+  return Math.floor(date.getTime() / 60000);
 }
 
-function createHistoryEvent(regionId, status, startSlot, endSlot = null) {
+function createHistoryEvent(regionId, status, startMinute, endMinute = null) {
   const region = REGIONS.find(item => item.id === regionId);
-  return { regionId, regionName: region.name, status, startSlot, endSlot };
+  return { regionId, regionName: region.name, status, startMinute, endMinute };
 }
 
 function createHistoryCache(now) {
-  const startSlot = historyDayStartSlot(now);
-  const previousStates = calculateSimulation(startSlot - 1).states;
+  const startMinute = historyDayStartMinute(now);
+  const previousStates = calculateSimulation(startMinute - 1).states;
   const openEvents = {};
   for (const region of REGIONS) {
     const state = previousStates[region.id];
     if (state.status !== "clear") {
-      openEvents[region.id] = createHistoryEvent(region.id, state.status, state.sinceSlot);
+      openEvents[region.id] = createHistoryEvent(region.id, state.status, state.sinceMinute);
     }
   }
   return {
     dayKey: historyDayKey(now),
-    throughSlot: startSlot - 1,
+    throughMinute: startMinute - 1,
     states: previousStates,
     events: [],
     openEvents
   };
 }
 
-function advanceHistoryCache(targetSlot) {
-  for (let slot = historyCache.throughSlot + 1; slot <= targetSlot; slot++) {
+function advanceHistoryCache(targetMinute) {
+  for (let minute = historyCache.throughMinute + 1; minute <= targetMinute; minute++) {
     const previousStates = historyCache.states;
-    const cycleOffset = ((slot % CONFIG.historySlots) + CONFIG.historySlots) % CONFIG.historySlots;
-    const nextStates = cycleOffset === 0 ? initialStates(slot) : advanceSimulation(previousStates, slot).states;
+    const cycleOffset = ((minute % CONFIG.historyMinutes) + CONFIG.historyMinutes) % CONFIG.historyMinutes;
+    const nextStates = cycleOffset === 0 ? initialStates(minute) : advanceSimulation(previousStates, minute).states;
     for (const region of REGIONS) {
       const previous = previousStates[region.id];
       const next = nextStates[region.id];
       if (previous.status === next.status) continue;
       if (previous.status !== "clear") {
         const openEvent = historyCache.openEvents[region.id]
-          || createHistoryEvent(region.id, previous.status, previous.sinceSlot);
-        historyCache.events.push({ ...openEvent, endSlot: slot });
+          || createHistoryEvent(region.id, previous.status, previous.sinceMinute);
+        historyCache.events.push({ ...openEvent, endMinute: minute });
         delete historyCache.openEvents[region.id];
       }
       if (next.status !== "clear") {
-        historyCache.openEvents[region.id] = createHistoryEvent(region.id, next.status, slot);
+        historyCache.openEvents[region.id] = createHistoryEvent(region.id, next.status, minute);
       }
     }
     historyCache.states = nextStates;
-    historyCache.throughSlot = slot;
+    historyCache.throughMinute = minute;
   }
 }
 
@@ -616,15 +727,14 @@ function ensureHistoryCache(now = Date.now()) {
   if (!historyCache || historyCache.dayKey !== historyDayKey(now)) {
     historyCache = createHistoryCache(now);
   }
-  const targetSlot = Math.floor(now / (CONFIG.slotMinutes * 60 * 1000));
-  if (historyCache.throughSlot < targetSlot) advanceHistoryCache(targetSlot);
+  const targetMinute = Math.floor(now / 60000);
+  if (historyCache.throughMinute < targetMinute) advanceHistoryCache(targetMinute);
   return historyCache;
 }
 
 function formatHistoryDuration(event, now) {
-  const slotMs = CONFIG.slotMinutes * 60 * 1000;
-  const start = event.startSlot * slotMs;
-  const end = event.endSlot === null ? now : event.endSlot * slotMs;
+  const start = event.startMinute * 60000;
+  const end = event.endMinute === null ? now : event.endMinute * 60000;
   const totalMinutes = Math.max(0, Math.floor((end - start) / 60000));
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
@@ -633,14 +743,14 @@ function formatHistoryDuration(event, now) {
 }
 
 function allHistoryEvents() {
-  const ongoing = Object.values(historyCache.openEvents).map(event => ({ ...event, endSlot: null }));
+  const ongoing = Object.values(historyCache.openEvents).map(event => ({ ...event, endMinute: null }));
   return [...historyCache.events, ...ongoing];
 }
 
 function historyEvents() {
   return allHistoryEvents()
     .filter(event => historyFilter === "all" || event.status === historyFilter)
-    .sort((a, b) => b.startSlot - a.startSlot || b.regionId - a.regionId);
+    .sort((a, b) => b.startMinute - a.startMinute || b.regionId - a.regionId);
 }
 
 function formatTotalMinutes(totalMinutes) {
@@ -653,13 +763,13 @@ function formatTotalMinutes(totalMinutes) {
 function calculateDailyStatistics(now = Date.now()) {
   ensureHistoryCache(now);
   if (dailyStatisticsCache?.dayKey === historyCache.dayKey
-      && dailyStatisticsCache.throughSlot === historyCache.throughSlot) {
+      && dailyStatisticsCache.throughMinute === historyCache.throughMinute) {
     return dailyStatisticsCache.value;
   }
 
   const events = allHistoryEvents();
-  const dayStartSlot = historyDayStartSlot(now);
-  const endSlot = historyCache.throughSlot;
+  const dayStartMinute = historyDayStartMinute(now);
+  const endMinute = historyCache.throughMinute;
   const countsByLevel = { yellow: 0, red: 0 };
   const countsByRegion = Object.fromEntries(REGIONS.map(region => [region.id, 0]));
   const durationByRegion = Object.fromEntries(REGIONS.map(region => [region.id, 0]));
@@ -668,13 +778,13 @@ function calculateDailyStatistics(now = Date.now()) {
   for (const event of events) {
     countsByLevel[event.status]++;
     countsByRegion[event.regionId]++;
-    const clippedStart = Math.max(event.startSlot, dayStartSlot);
-    const clippedEnd = Math.min(event.endSlot ?? endSlot, endSlot);
-    durationByRegion[event.regionId] += Math.max(0, clippedEnd - clippedStart) * CONFIG.slotMinutes;
-    if (event.endSlot !== null) {
-      const durationSlots = event.endSlot - event.startSlot;
-      if (!longestCompleted || durationSlots > longestCompleted.durationSlots) {
-        longestCompleted = { ...event, durationSlots };
+    const clippedStart = Math.max(event.startMinute, dayStartMinute);
+    const clippedEnd = Math.min(event.endMinute ?? endMinute, endMinute);
+    durationByRegion[event.regionId] += Math.max(0, clippedEnd - clippedStart);
+    if (event.endMinute !== null) {
+      const durationMinutes = event.endMinute - event.startMinute;
+      if (!longestCompleted || durationMinutes > longestCompleted.durationMinutes) {
+        longestCompleted = { ...event, durationMinutes };
       }
     }
   }
@@ -696,18 +806,17 @@ function calculateDailyStatistics(now = Date.now()) {
     longestCompleted,
     durations
   };
-  dailyStatisticsCache = { dayKey: historyCache.dayKey, throughSlot: historyCache.throughSlot, value };
+  dailyStatisticsCache = { dayKey: historyCache.dayKey, throughMinute: historyCache.throughMinute, value };
   return value;
 }
 
 function renderHistory(now = Date.now()) {
   ensureHistoryCache(now);
-  const slotMs = CONFIG.slotMinutes * 60 * 1000;
   const events = historyEvents();
   document.querySelector("#history-list").innerHTML = events.length ? events.map(event => {
-    const startTime = formatTime(event.startSlot * slotMs);
-    const endTime = event.endSlot === null ? "сейчас" : formatTime(event.endSlot * slotMs);
-    const ongoing = event.endSlot === null ? ' <span class="history-ongoing">· продолжается</span>' : "";
+    const startTime = formatTime(event.startMinute * 60000);
+    const endTime = event.endMinute === null ? "сейчас" : formatTime(event.endMinute * 60000);
+    const ongoing = event.endMinute === null ? ' <span class="history-ongoing">· продолжается</span>' : "";
     return `
       <div class="history-item ${event.status}">
         <span class="history-bar" aria-hidden="true"></span>
@@ -763,33 +872,33 @@ function showToast(message) {
   setTimeout(() => dismissToast(toast), 6000);
 }
 
-function processSlotNotifications(slot, states) {
-  if (notificationSlot === null) {
-    notificationSlot = slot;
+function processMinuteNotifications(minute, states) {
+  if (notificationMinute === null) {
+    notificationMinute = minute;
     notificationStates = states;
     return;
   }
-  if (slot <= notificationSlot) return;
-  if (slot - notificationSlot > CONFIG.historySlots) {
-    notificationSlot = slot;
+  if (minute <= notificationMinute) return;
+  if (minute - notificationMinute > CONFIG.historyMinutes) {
+    notificationMinute = minute;
     notificationStates = states;
     return;
   }
 
   const changes = [];
   let previousStates = notificationStates;
-  for (let currentSlot = notificationSlot + 1; currentSlot <= slot; currentSlot++) {
-    const cycleOffset = ((currentSlot % CONFIG.historySlots) + CONFIG.historySlots) % CONFIG.historySlots;
-    const nextStates = cycleOffset === 0 ? initialStates(currentSlot) : advanceSimulation(previousStates, currentSlot).states;
+  for (let currentMinute = notificationMinute + 1; currentMinute <= minute; currentMinute++) {
+    const cycleOffset = ((currentMinute % CONFIG.historyMinutes) + CONFIG.historyMinutes) % CONFIG.historyMinutes;
+    const nextStates = cycleOffset === 0 ? initialStates(currentMinute) : advanceSimulation(previousStates, currentMinute).states;
     for (const region of REGIONS) {
       const previousStatus = previousStates[region.id].status;
       const status = nextStates[region.id].status;
-      if (status !== previousStatus) changes.push({ regionId: region.id, previousStatus, status, slot: currentSlot });
+      if (status !== previousStatus) changes.push({ regionId: region.id, previousStatus, status, minute: currentMinute });
     }
     previousStates = nextStates;
   }
 
-  notificationSlot = slot;
+  notificationMinute = minute;
   notificationStates = states;
   notificationMessages(changes).forEach(showToast);
 }
@@ -898,17 +1007,16 @@ function renderMap() {
   applyMapTheme();
 }
 
-function getCurrentSimulationSlot(now = Date.now()) {
-  return Math.floor(now / (CONFIG.slotMinutes * 60 * 1000));
+function getCurrentSimulationMinute(now = Date.now()) {
+  return Math.floor(now / 60000);
 }
 
-function refreshSimulationState(slot, now = Date.now()) {
-  const slotMs = CONFIG.slotMinutes * 60 * 1000;
-  const simulation = simulateStates(slot);
-  processSlotNotifications(slot, simulation.states);
+function refreshSimulationState(minute, now = Date.now()) {
+  const simulation = simulateStates(minute);
+  processMinuteNotifications(minute, simulation.states);
   currentStates = REGIONS.map(region => {
     const generated = simulation.states[region.id];
-    return { ...region, ...generated, since: generated.sinceSlot * slotMs };
+    return { ...region, ...generated, since: generated.sinceMinute * 60000 };
   });
   renderMap();
   renderThreats();
@@ -916,13 +1024,45 @@ function refreshSimulationState(slot, now = Date.now()) {
   if (historyDialog.open) renderHistory(now);
 }
 
-function updateIfNeeded(now = Date.now()) {
-  const slot = getCurrentSimulationSlot(now);
-  if (slot !== lastSimulationSlot) {
-    refreshSimulationState(slot, now);
-    lastSimulationSlot = slot;
+function updateSimulationIfNeeded(now = Date.now()) {
+  const minute = getCurrentSimulationMinute(now);
+  if (minute !== lastSimulationMinute) {
+    refreshSimulationState(minute, now);
+    lastSimulationMinute = minute;
   }
   updateClock(now);
+}
+
+function nextGlobalBoundaryMinute(minute) {
+  const block = Math.floor(minute / GLOBAL_EVENT_CONFIG.blockMinutes);
+  const boundaries = [];
+  for (let candidateBlock = block - 1; candidateBlock <= block + 2; candidateBlock++) {
+    const event = scheduledGlobalEvent(candidateBlock);
+    if (!event) continue;
+    const endMinute = event.startMinute + event.duration;
+    if (event.startMinute > minute) boundaries.push(event.startMinute);
+    if (endMinute > minute) boundaries.push(endMinute);
+  }
+  return boundaries.length ? Math.min(...boundaries) : Infinity;
+}
+
+function nextSimulationEventMinute(minute, states) {
+  const nextRegionCheck = Math.min(...REGIONS.map(region => states[region.id].nextCheckMinute));
+  const cycleStart = minute - ((minute % CONFIG.historyMinutes) + CONFIG.historyMinutes) % CONFIG.historyMinutes;
+  const nextCycleStart = cycleStart + CONFIG.historyMinutes;
+  return Math.min(nextRegionCheck, nextGlobalBoundaryMinute(minute), nextCycleStart);
+}
+
+function scheduleNextSimulationUpdate(now = Date.now()) {
+  clearTimeout(simulationUpdateTimer);
+  const minute = getCurrentSimulationMinute(now);
+  const simulation = simulateStates(minute);
+  const nextMinute = nextSimulationEventMinute(minute, simulation.states);
+  const delay = Math.max(50, nextMinute * 60000 - now + 50);
+  simulationUpdateTimer = setTimeout(() => {
+    updateSimulationIfNeeded();
+    scheduleNextSimulationUpdate();
+  }, delay);
 }
 
 function activeThreats() {
@@ -967,7 +1107,7 @@ function renderStatistics(now = Date.now()) {
       text: true
     },
     {
-      value: longest ? formatTotalMinutes(longest.durationSlots * CONFIG.slotMinutes) : "—",
+      value: longest ? formatTotalMinutes(longest.durationMinutes) : "—",
       label: longest ? `Самая долгая завершённая · ${longest.regionId} — ${longest.regionName}` : "Завершённых тревог пока нет",
       text: true
     }
@@ -1048,9 +1188,16 @@ setTheme(getTheme(), false);
 let savedThreatsCollapsed = false;
 try { savedThreatsCollapsed = localStorage.getItem(COLLAPSE_KEY) === "true"; } catch (_) {}
 setThreatsCollapsed(window.matchMedia("(max-width: 640px)").matches || savedThreatsCollapsed);
-updateIfNeeded();
-setInterval(updateIfNeeded, 1000);
+updateSimulationIfNeeded();
+scheduleNextSimulationUpdate();
+setInterval(updateClock, 1000);
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) updateIfNeeded();
+  if (!document.hidden) {
+    updateSimulationIfNeeded();
+    scheduleNextSimulationUpdate();
+  }
 });
-window.addEventListener("focus", () => updateIfNeeded());
+window.addEventListener("focus", () => {
+  updateSimulationIfNeeded();
+  scheduleNextSimulationUpdate();
+});
