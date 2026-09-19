@@ -179,6 +179,30 @@ const CONFIG = {
   seed: 217031
 };
 
+const GLOBAL_EVENT_CONFIG = {
+  blockSlots: 24,
+  calmChance: 0.20,
+  largeAttackChance: 0.12,
+  waveChance: 0.36
+};
+
+const EVENT_DEPTH_BY_ZONE = {
+  "frontline": 0,
+  "frontline / southern frontline": 0,
+  "near-front": 1,
+  "near-front / operational rear": 1,
+  "middle depth": 2,
+  "middle depth / capital": 2,
+  "deep rear / middle depth": 3,
+  "deep rear": 3,
+  "very deep rear": 4,
+  "remote island": 5
+};
+
+const FRONTLINE_REGION_IDS = REGIONS
+  .filter(region => EVENT_DEPTH_BY_ZONE[REGION_RISK[region.id].zone] === 0)
+  .map(region => region.id);
+
 const THEME_KEY = "lumenaria-theme";
 const COLLAPSE_KEY = "lumenaria-threats-collapsed";
 const mapObject = document.querySelector("#alarm-map");
@@ -199,6 +223,114 @@ function hash32(a) {
 function deterministicRoll(regionId, slot, salt = 0) {
   const mixed = hash32(CONFIG.seed ^ hash32(regionId * 1009) ^ hash32(slot * 7919) ^ salt);
   return mixed / 4294967296;
+}
+
+function deterministicGlobalRoll(block, salt) {
+  return hash32(CONFIG.seed ^ hash32(block * 104729) ^ salt) / 4294967296;
+}
+
+function scheduledGlobalEvent(block) {
+  const selector = deterministicGlobalRoll(block, 0x32d31b79);
+  let type = "normal";
+  if (selector < GLOBAL_EVENT_CONFIG.calmChance) {
+    type = "calm";
+  } else if (selector < GLOBAL_EVENT_CONFIG.calmChance + GLOBAL_EVENT_CONFIG.largeAttackChance) {
+    type = "large_attack";
+  } else if (selector < GLOBAL_EVENT_CONFIG.calmChance + GLOBAL_EVENT_CONFIG.largeAttackChance + GLOBAL_EVENT_CONFIG.waveChance) {
+    type = "wave";
+  }
+
+  if (type === "normal") return null;
+  const startSlot = block * GLOBAL_EVENT_CONFIG.blockSlots
+    + Math.floor(deterministicGlobalRoll(block, 0x749ea2d3) * GLOBAL_EVENT_CONFIG.blockSlots);
+  const durationRoll = deterministicGlobalRoll(block, 0x1b56c4e9);
+  let duration;
+  let affectedDepth = 0;
+  if (type === "calm") {
+    duration = durationRoll < 0.82
+      ? 1 + Math.floor(durationRoll / 0.82 * 4)
+      : 5 + Math.floor((durationRoll - 0.82) / 0.18 * 2);
+  } else if (type === "wave") {
+    duration = 5 + Math.floor(durationRoll * 8);
+    affectedDepth = deterministicGlobalRoll(block, 0x6937af11) < 0.68 ? 1 : 2;
+  } else {
+    duration = 8 + Math.floor(durationRoll * 11);
+    const depthRoll = deterministicGlobalRoll(block, 0x6937af11);
+    affectedDepth = depthRoll < 0.55 ? 1 : depthRoll < 0.88 ? 2 : depthRoll < 0.97 ? 3 : 4;
+  }
+
+  const anchorIndex = Math.floor(deterministicGlobalRoll(block, 0x5bc20a6f) * FRONTLINE_REGION_IDS.length);
+  return {
+    type,
+    startSlot,
+    duration,
+    intensity: type === "calm" ? 0 : 0.75 + deterministicGlobalRoll(block, 0x78f2d14b) * 0.50,
+    affectedDepth,
+    anchorRegionId: FRONTLINE_REGION_IDS[anchorIndex]
+  };
+}
+
+function globalEventAt(slot) {
+  const block = Math.floor(slot / GLOBAL_EVENT_CONFIG.blockSlots);
+  const candidates = [scheduledGlobalEvent(block - 1), scheduledGlobalEvent(block)]
+    .filter(event => event && slot >= event.startSlot && slot < event.startSlot + event.duration);
+  if (!candidates.length) {
+    return { type: "normal", startSlot: null, duration: 0, intensity: 0, affectedDepth: 0 };
+  }
+  const priority = { calm: 3, large_attack: 2, wave: 1 };
+  return candidates.sort((a, b) => priority[b.type] - priority[a.type] || b.startSlot - a.startSlot)[0];
+}
+
+const regionDistanceCache = new Map();
+
+function regionDistance(originId, targetId) {
+  const cacheKey = `${originId}:${targetId}`;
+  if (regionDistanceCache.has(cacheKey)) return regionDistanceCache.get(cacheKey);
+  const queue = [[originId, 0]];
+  const visited = new Set([originId]);
+  while (queue.length) {
+    const [regionId, distance] = queue.shift();
+    if (regionId === targetId) {
+      regionDistanceCache.set(cacheKey, distance);
+      return distance;
+    }
+    for (const neighborId of REGION_NEIGHBORS[regionId]) {
+      if (!visited.has(neighborId)) {
+        visited.add(neighborId);
+        queue.push([neighborId, distance + 1]);
+      }
+    }
+  }
+  regionDistanceCache.set(cacheKey, Infinity);
+  return Infinity;
+}
+
+function globalEventModifiers(regionId, event, slot) {
+  if (event.type === "normal" || event.type === "calm") return { yellow: 1, red: 1 };
+  const progress = (slot - event.startSlot) / Math.max(1, event.duration - 1);
+  const fade = Math.max(0, 1 - progress);
+
+  if (event.type === "wave") {
+    const distance = regionDistance(event.anchorRegionId, regionId);
+    if (distance > event.affectedDepth) return { yellow: 1, red: 1 };
+    const proximity = 1 - distance / (event.affectedDepth + 1) * 0.35;
+    return {
+      yellow: 1 + event.intensity * 2.2 * fade * proximity,
+      red: distance < event.affectedDepth
+        ? 1 + event.intensity * 1.4 * fade * proximity
+        : 1
+    };
+  }
+
+  const depth = EVENT_DEPTH_BY_ZONE[REGION_RISK[regionId].zone];
+  if (depth > event.affectedDepth) return { yellow: 1, red: 1 };
+  const proximity = 1 - depth / (event.affectedDepth + 1) * 0.40;
+  return {
+    yellow: 1 + event.intensity * 2.0 * fade * proximity,
+    red: depth < event.affectedDepth
+      ? 1 + event.intensity * 1.7 * fade * proximity
+      : 1
+  };
 }
 
 function neighborModifiers(regionId, previousStates) {
@@ -231,10 +363,10 @@ function stateDurationTarget(regionId, state, profile) {
   return minimum + Math.floor(roll * (maximum - minimum + 1));
 }
 
-function transitionProbabilities(regionId, previousState, modifiers, slot) {
+function transitionProbabilities(regionId, previousState, modifiers, slot, eventModifiers = { yellow: 1, red: 1 }) {
   const risk = REGION_RISK[regionId];
-  const baseYellow = CONFIG.chances.yellow * risk.yellow * modifiers.yellow;
-  const baseRed = CONFIG.chances.red * risk.red * modifiers.red;
+  const baseYellow = CONFIG.chances.yellow * risk.yellow * modifiers.yellow * eventModifiers.yellow;
+  const baseRed = CONFIG.chances.red * risk.red * modifiers.red * eventModifiers.red;
   if (previousState.status === "clear") {
     return {
       yellow: Math.min(0.24, baseYellow),
@@ -264,9 +396,18 @@ function chooseStatus(regionId, slot, probabilities) {
 }
 
 function initialStates(cycleStart) {
+  const event = globalEventAt(cycleStart);
   return Object.fromEntries(REGIONS.map(region => {
     const clearState = { status: "clear", sinceSlot: cycleStart, alertSinceSlot: null };
-    const probabilities = transitionProbabilities(region.id, clearState, { yellow: 1, red: 1 }, cycleStart);
+    const probabilities = event.type === "calm"
+      ? { yellow: 0, red: 0 }
+      : transitionProbabilities(
+          region.id,
+          clearState,
+          { yellow: 1, red: 1 },
+          cycleStart,
+          globalEventModifiers(region.id, event, cycleStart)
+        );
     const status = chooseStatus(region.id, cycleStart, probabilities);
     return [region.id, {
       status,
@@ -281,14 +422,24 @@ function simulateStates(slot) {
   const cycleStart = slot - ((slot % CONFIG.historySlots) + CONFIG.historySlots) % CONFIG.historySlots;
   let states = initialStates(cycleStart);
   let debugRows = [];
+  let currentGlobalEvent = globalEventAt(cycleStart);
   for (let currentSlot = cycleStart + 1; currentSlot <= slot; currentSlot++) {
     const previousStates = states;
     const nextStates = {};
     const isFinalSlot = currentSlot === slot;
+    currentGlobalEvent = globalEventAt(currentSlot);
     for (const region of REGIONS) {
       const previous = previousStates[region.id];
       const modifiers = neighborModifiers(region.id, previousStates);
-      const probabilities = transitionProbabilities(region.id, previous, modifiers, currentSlot);
+      const probabilities = currentGlobalEvent.type === "calm"
+        ? { yellow: 0, red: 0 }
+        : transitionProbabilities(
+            region.id,
+            previous,
+            modifiers,
+            currentSlot,
+            globalEventModifiers(region.id, currentGlobalEvent, currentSlot)
+          );
       const status = chooseStatus(region.id, currentSlot, probabilities);
       nextStates[region.id] = {
         status,
@@ -329,7 +480,16 @@ function simulateStates(slot) {
     }));
   }
   simulationCache = { slot, states };
-  if (DEBUG_SIMULATION) console.table(debugRows);
+  if (DEBUG_SIMULATION) {
+    console.table([{
+      globalEventType: currentGlobalEvent.type,
+      eventStartSlot: currentGlobalEvent.startSlot,
+      eventDurationMinutes: currentGlobalEvent.duration * CONFIG.slotMinutes,
+      waveIntensity: currentGlobalEvent.intensity.toFixed(2),
+      affectedDepth: currentGlobalEvent.affectedDepth
+    }]);
+    console.table(debugRows);
+  }
   return simulationCache;
 }
 
@@ -337,7 +497,7 @@ function validateSimulationConfig() {
   const ids = new Set(REGIONS.map(region => region.id));
   for (const id of ids) {
     const zone = REGION_RISK[id]?.zone;
-    if (!REGION_RISK[id] || !REGION_NEIGHBORS[id] || NEIGHBOR_INFLUENCE_BY_ZONE[zone] === undefined || !PERSISTENCE_BY_ZONE[zone]) {
+    if (!REGION_RISK[id] || !REGION_NEIGHBORS[id] || NEIGHBOR_INFLUENCE_BY_ZONE[zone] === undefined || !PERSISTENCE_BY_ZONE[zone] || EVENT_DEPTH_BY_ZONE[zone] === undefined) {
       throw new Error(`Incomplete simulation configuration for region ${id}`);
     }
     for (const neighborId of REGION_NEIGHBORS[id]) {
