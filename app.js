@@ -133,6 +133,26 @@ const MAX_SAME_STATE_DURATION_BY_DEPTH = {
   5: [5 * 60, 10 * 60]
 };
 
+const CONTINUOUS_ALERT_DURATION_BY_DEPTH = {
+  0: [7 * 60, 15 * 60],
+  1: [5 * 60, 12 * 60],
+  2: [4 * 60, 10 * 60],
+  3: [3 * 60, 8 * 60],
+  4: [3 * 60, 8 * 60],
+  5: [3 * 60, 8 * 60]
+};
+
+const CLEAR_GAP_DURATION_BY_DEPTH = {
+  0: [60, 3 * 60],
+  1: [60, 3 * 60],
+  2: [2 * 60, 4 * 60],
+  3: [3 * 60, 6 * 60],
+  4: [3 * 60, 6 * 60],
+  5: [3 * 60, 6 * 60]
+};
+
+const REGION_EPISODE_CYCLE_SECONDS = 6 * 60 * 60;
+
 const DEBUG_SIMULATION = false;
 
 const STATUS = {
@@ -318,6 +338,64 @@ function attackEventsForRange(startSecond, endSecond) {
   return events.sort((a, b) => a.startedAt - b.startedAt || a.eventIndex - b.eventIndex);
 }
 
+function regionalAlertWindows(regionId, startSecond, endSecond) {
+  const depth = EVENT_DEPTH_BY_ZONE[REGION_RISK[regionId].zone];
+  const cycleOffset = eventRange(
+    regionId, 0x40b71d93, 0, REGION_EPISODE_CYCLE_SECONDS - 1, regionId
+  );
+  const firstCycle = Math.floor((startSecond - cycleOffset) / REGION_EPISODE_CYCLE_SECONDS) - 1;
+  const lastCycle = Math.floor((endSecond - cycleOffset) / REGION_EPISODE_CYCLE_SECONDS) + 1;
+  const windows = [];
+  for (let cycleIndex = firstCycle; cycleIndex <= lastCycle; cycleIndex++) {
+    const cycleStart = cycleIndex * REGION_EPISODE_CYCLE_SECONDS + cycleOffset;
+    const cycleEnd = cycleStart + REGION_EPISODE_CYCLE_SECONDS;
+    let cursor = cycleStart;
+    let windowIndex = 0;
+    while (cursor < cycleEnd) {
+      const [minimumGap, maximumGap] = CLEAR_GAP_DURATION_BY_DEPTH[depth];
+      const gapDuration = eventRange(
+        cycleIndex, 0x12f46a8d, minimumGap, maximumGap, regionId, windowIndex
+      );
+      const startedAt = cursor + gapDuration;
+      if (startedAt >= cycleEnd) break;
+
+      let [minimumDuration, maximumDuration] = CONTINUOUS_ALERT_DURATION_BY_DEPTH[depth];
+      const rareLongFrontlineWindow = depth === 0
+        && eventRoll(cycleIndex, 0x75a31ce9, regionId, windowIndex) < 0.06;
+      if (rareLongFrontlineWindow) {
+        minimumDuration = 20 * 60;
+        maximumDuration = 25 * 60;
+      }
+      const duration = eventRange(
+        cycleIndex, 0x5d2387f1, minimumDuration, maximumDuration, regionId, windowIndex
+      );
+      const endsAt = Math.min(cycleEnd, startedAt + duration);
+      if (endsAt > startSecond && startedAt < endSecond) windows.push({ startedAt, endsAt });
+      cursor = endsAt;
+      windowIndex++;
+    }
+  }
+  return windows.sort((a, b) => a.startedAt - b.startedAt);
+}
+
+function splitPhasesIntoAlertWindows(regionId, phases) {
+  if (!phases.length) return [];
+  const windows = regionalAlertWindows(
+    regionId,
+    phases[0].startedAt,
+    phases[phases.length - 1].endsAt
+  );
+  const splitPhases = [];
+  for (const phase of phases) {
+    for (const window of windows) {
+      const startedAt = Math.max(phase.startedAt, window.startedAt);
+      const endsAt = Math.min(phase.endsAt, window.endsAt);
+      if (endsAt > startedAt) splitPhases.push({ status: phase.status, startedAt, endsAt });
+    }
+  }
+  return splitPhases.sort((a, b) => a.startedAt - b.startedAt || a.endsAt - b.endsAt);
+}
+
 function buildEffectPhases(event, regionId, delay, redCapable) {
   const depth = EVENT_DEPTH_BY_ZONE[REGION_RISK[regionId].zone];
   const startedAt = event.startedAt + delay;
@@ -336,7 +414,10 @@ function buildEffectPhases(event, regionId, delay, redCapable) {
     );
     const endsAt = Math.min(threatEndsAt, startedAt + yellowDuration);
     phases.push({ status: "yellow", startedAt, endsAt });
-    return { eventId: event.id, regionId, delay, depth, phases, startedAt, endsAt };
+    return {
+      eventId: event.id, regionId, delay, depth,
+      phases: splitPhasesIntoAlertWindows(regionId, phases), startedAt, endsAt
+    };
   }
 
   const firstPhaseEnd = Math.min(threatEndsAt, startedAt + escalationDelay);
@@ -365,7 +446,10 @@ function buildEffectPhases(event, regionId, delay, redCapable) {
     status = status === "red" ? "yellow" : "red";
     phaseIndex++;
   }
-  return { eventId: event.id, regionId, delay, depth, phases, startedAt, endsAt: threatEndsAt };
+  return {
+    eventId: event.id, regionId, delay, depth,
+    phases: splitPhasesIntoAlertWindows(regionId, phases), startedAt, endsAt: threatEndsAt
+  };
 }
 
 function longRangeEffects(event) {
@@ -1205,7 +1289,15 @@ function auditEventDrivenSimulation(durationSeconds) {
         statistics[region.id].activeSince = second;
       } else if (previousStatus !== "clear" && status === "clear") {
         const activeSince = statistics[region.id].activeSince ?? startSecond;
-        statistics[region.id].longestSeconds = Math.max(statistics[region.id].longestSeconds, second - activeSince);
+        const activeDuration = second - activeSince;
+        statistics[region.id].longestSeconds = Math.max(statistics[region.id].longestSeconds, activeDuration);
+        const depth = EVENT_DEPTH_BY_ZONE[REGION_RISK[region.id].zone];
+        const maximumEpisodeDuration = depth === 0
+          ? 25 * 60
+          : CONTINUOUS_ALERT_DURATION_BY_DEPTH[depth][1];
+        if (activeDuration > maximumEpisodeDuration) {
+          anomalies.push(`Регион ${region.id}: непрерывная тревога длилась слишком долго`);
+        }
         statistics[region.id].activeSince = null;
       }
       statuses[region.id] = status;
@@ -1235,10 +1327,18 @@ function auditEventDrivenSimulation(durationSeconds) {
       }
     }
     if (statistics[region.id].activeSince !== null) {
+      const activeDuration = endSecond - statistics[region.id].activeSince;
       statistics[region.id].longestSeconds = Math.max(
         statistics[region.id].longestSeconds,
-        endSecond - statistics[region.id].activeSince
+        activeDuration
       );
+      const depth = EVENT_DEPTH_BY_ZONE[REGION_RISK[region.id].zone];
+      const maximumEpisodeDuration = depth === 0
+        ? 25 * 60
+        : CONTINUOUS_ALERT_DURATION_BY_DEPTH[depth][1];
+      if (activeDuration > maximumEpisodeDuration) {
+        anomalies.push(`Регион ${region.id}: непрерывная тревога длилась слишком долго`);
+      }
     }
   }
 
