@@ -36,23 +36,40 @@ const REGIONS = [
 ];
 
 const REGION_RISK = {
-  1: { yellow: 0.45, red: 0.35 }, 2: { yellow: 0.50, red: 0.40 },
-  3: { yellow: 0.85, red: 0.70 }, 4: { yellow: 1.75, red: 1.55 },
-  5: { yellow: 1.55, red: 1.45 }, 6: { yellow: 1.35, red: 1.25 },
-  7: { yellow: 1.25, red: 1.15 }, 8: { yellow: 1.05, red: 0.90 },
-  9: { yellow: 1.00, red: 0.90 }, 10: { yellow: 1.10, red: 1.60 },
-  11: { yellow: 1.00, red: 0.95 }, 12: { yellow: 0.80, red: 0.70 },
-  13: { yellow: 1.00, red: 0.95 }, 14: { yellow: 1.30, red: 1.20 },
-  15: { yellow: 1.80, red: 1.70 }, 16: { yellow: 1.70, red: 1.60 },
-  17: { yellow: 1.85, red: 1.75 }, 18: { yellow: 1.60, red: 1.50 },
-  19: { yellow: 1.35, red: 1.25 }, 20: { yellow: 1.55, red: 1.45 },
-  21: { yellow: 1.15, red: 1.05 }, 22: { yellow: 1.05, red: 0.95 },
-  23: { yellow: 0.80, red: 0.70 }, 24: { yellow: 0.90, red: 0.80 },
-  25: { yellow: 0.60, red: 0.50 }, 26: { yellow: 0.65, red: 0.55 },
-  27: { yellow: 0.65, red: 0.55 }, 28: { yellow: 0.95, red: 0.85 },
-  29: { yellow: 0.65, red: 0.55 }, 30: { yellow: 0.80, red: 0.70 },
-  31: { yellow: 0.80, red: 0.70 }, 32: { yellow: 0.65, red: 0.55 },
-  33: { yellow: 0.30, red: 0.25 }, 34: { yellow: 0.70, red: 0.60 }
+  1: { zone: "very deep rear", yellow: 0.18, red: 0.07 },
+  2: { zone: "very deep rear", yellow: 0.20, red: 0.08 },
+  3: { zone: "deep rear", yellow: 0.32, red: 0.15 },
+  4: { zone: "frontline", yellow: 1.80, red: 1.60 },
+  5: { zone: "frontline", yellow: 1.70, red: 1.50 },
+  6: { zone: "near-front", yellow: 1.20, red: 1.00 },
+  7: { zone: "near-front", yellow: 1.05, red: 0.85 },
+  8: { zone: "middle depth", yellow: 0.58, red: 0.35 },
+  9: { zone: "middle depth", yellow: 0.55, red: 0.32 },
+  10: { zone: "middle depth / capital", yellow: 0.65, red: 1.10 },
+  11: { zone: "middle depth", yellow: 0.50, red: 0.28 },
+  12: { zone: "deep rear", yellow: 0.30, red: 0.14 },
+  13: { zone: "middle depth", yellow: 0.55, red: 0.34 },
+  14: { zone: "near-front", yellow: 1.00, red: 0.78 },
+  15: { zone: "frontline", yellow: 1.85, red: 1.70 },
+  16: { zone: "frontline", yellow: 1.80, red: 1.65 },
+  17: { zone: "frontline", yellow: 1.90, red: 1.75 },
+  18: { zone: "frontline", yellow: 1.70, red: 1.50 },
+  19: { zone: "near-front", yellow: 1.10, red: 0.90 },
+  20: { zone: "frontline / southern frontline", yellow: 1.65, red: 1.45 },
+  21: { zone: "near-front / operational rear", yellow: 0.85, red: 0.60 },
+  22: { zone: "middle depth", yellow: 0.62, red: 0.38 },
+  23: { zone: "deep rear", yellow: 0.34, red: 0.16 },
+  24: { zone: "deep rear", yellow: 0.26, red: 0.11 },
+  25: { zone: "very deep rear", yellow: 0.16, red: 0.06 },
+  26: { zone: "very deep rear", yellow: 0.18, red: 0.07 },
+  27: { zone: "very deep rear", yellow: 0.15, red: 0.05 },
+  28: { zone: "deep rear / middle depth", yellow: 0.38, red: 0.18 },
+  29: { zone: "very deep rear", yellow: 0.18, red: 0.07 },
+  30: { zone: "deep rear", yellow: 0.28, red: 0.12 },
+  31: { zone: "deep rear", yellow: 0.30, red: 0.13 },
+  32: { zone: "very deep rear", yellow: 0.20, red: 0.08 },
+  33: { zone: "remote island", yellow: 0.08, red: 0.025 },
+  34: { zone: "very deep rear", yellow: 0.22, red: 0.09 }
 };
 
 // Only shared SVG land borders count. Offshore regions intentionally have no neighbors.
@@ -73,13 +90,17 @@ const REGION_NEIGHBORS = {
   31: [30], 32: [], 33: [], 34: [3, 12, 23]
 };
 
-// Lower values are closer to the eastern threat source.
-const THREAT_DEPTH = {
-  1: 6, 2: 6, 3: 5, 4: 0, 5: 1, 6: 2, 7: 2, 8: 3,
-  9: 4, 10: 3, 11: 3, 12: 4, 13: 3, 14: 2, 15: 0, 16: 0,
-  17: 0, 18: 1, 19: 2, 20: 1, 21: 2, 22: 3, 23: 4, 24: 4,
-  25: 5, 26: 5, 27: 5, 28: 4, 29: 5, 30: 5, 31: 5, 32: 6,
-  33: 7, 34: 5
+const NEIGHBOR_INFLUENCE_BY_ZONE = {
+  "frontline": 1,
+  "frontline / southern frontline": 1,
+  "near-front": 0.85,
+  "near-front / operational rear": 0.75,
+  "middle depth": 0.35,
+  "middle depth / capital": 0.35,
+  "deep rear / middle depth": 0.25,
+  "deep rear": 0.12,
+  "very deep rear": 0.04,
+  "remote island": 0
 };
 
 const DEBUG_SIMULATION = false;
@@ -94,10 +115,10 @@ const STATUS = {
 const CONFIG = {
   slotMinutes: 5,
   chances: {
-    yellow: 0.08,
-    red: 0.02
+    yellow: 0.07,
+    red: 0.01
   },
-  neighborModifierCap: 1.65,
+  neighborModifierCap: 1.45,
   probabilityCap: 0.92,
   historySlots: 7 * 24 * 12,
   seed: 217031
@@ -126,23 +147,25 @@ function deterministicRoll(regionId, slot, salt = 0) {
 }
 
 function neighborModifiers(regionId, previousStates) {
-  let yellow = 1;
-  let red = 1;
+  let yellowNeighbors = 0;
+  let redNeighbors = 0;
   for (const neighborId of REGION_NEIGHBORS[regionId]) {
     const neighborStatus = previousStates[neighborId].status;
-    if (neighborStatus === "clear") continue;
-    const depthDifference = THREAT_DEPTH[regionId] - THREAT_DEPTH[neighborId];
-    const directionStrength = depthDifference > 0 ? 1.15 : depthDifference < 0 ? 0.85 : 1;
-    if (neighborStatus === "yellow") {
-      yellow *= 1 + 0.20 * directionStrength;
-    } else if (neighborStatus === "red") {
-      yellow *= 1 + 0.30 * directionStrength;
-      red *= 1 + 0.20 * directionStrength;
-    }
+    if (neighborStatus === "yellow") yellowNeighbors++;
+    if (neighborStatus === "red") redNeighbors++;
   }
+
+  // Count-based calculation keeps results independent of neighbor array order.
+  const rawYellow = Math.min(
+    CONFIG.neighborModifierCap,
+    1.15 ** yellowNeighbors * 1.25 ** redNeighbors
+  );
+  const rawRed = Math.min(CONFIG.neighborModifierCap, 1.15 ** redNeighbors);
+  const zoneInfluence = NEIGHBOR_INFLUENCE_BY_ZONE[REGION_RISK[regionId].zone];
+
   return {
-    yellow: Math.min(CONFIG.neighborModifierCap, yellow),
-    red: Math.min(CONFIG.neighborModifierCap, red)
+    yellow: 1 + (rawYellow - 1) * zoneInfluence,
+    red: 1 + (rawRed - 1) * zoneInfluence
   };
 }
 
@@ -153,14 +176,14 @@ function transitionProbabilities(regionId, previousStatus, modifiers) {
   let yellow;
   let red;
   if (previousStatus === "yellow") {
-    yellow = Math.min(0.72, 0.44 + baseYellow * 0.65);
-    red = Math.min(0.14, baseRed * 1.35);
+    yellow = Math.min(0.70, 0.50 + baseYellow * 0.45);
+    red = Math.min(0.12, baseRed * 1.50);
   } else if (previousStatus === "red") {
-    yellow = Math.min(0.40, 0.30 + baseYellow * 0.45);
-    red = Math.min(0.62, 0.46 + baseRed * 0.90);
+    yellow = Math.min(0.42, 0.34 + baseYellow * 0.25);
+    red = Math.min(0.62, 0.48 + baseRed * 0.75);
   } else {
-    yellow = Math.min(0.28, baseYellow);
-    red = Math.min(0.06, baseRed * 0.65);
+    yellow = Math.min(0.24, baseYellow);
+    red = Math.min(0.035, baseRed * 0.45);
   }
   const activeTotal = yellow + red;
   if (activeTotal > CONFIG.probabilityCap) {
@@ -206,12 +229,13 @@ function simulateStates(slot) {
       if (isFinalSlot) {
         debugRows.push({
           ID: region.id, name: region.name,
+          zone: REGION_RISK[region.id].zone,
           yellowRisk: REGION_RISK[region.id].yellow,
           redRisk: REGION_RISK[region.id].red,
           previousState: previous.status,
           neighborModifier: `Y ×${modifiers.yellow.toFixed(2)} / R ×${modifiers.red.toFixed(2)}`,
-          finalYellowProbability: probabilities.yellow.toFixed(4),
-          finalRedProbability: probabilities.red.toFixed(4),
+          finalYellowChance: probabilities.yellow.toFixed(4),
+          finalRedChance: probabilities.red.toFixed(4),
           currentState: status
         });
       }
@@ -221,12 +245,13 @@ function simulateStates(slot) {
   if (slot === cycleStart) {
     debugRows = REGIONS.map(region => ({
       ID: region.id, name: region.name,
+      zone: REGION_RISK[region.id].zone,
       yellowRisk: REGION_RISK[region.id].yellow,
       redRisk: REGION_RISK[region.id].red,
       previousState: "cycle start",
       neighborModifier: "Y ×1.00 / R ×1.00",
-      finalYellowProbability: (CONFIG.chances.yellow * REGION_RISK[region.id].yellow).toFixed(4),
-      finalRedProbability: (CONFIG.chances.red * REGION_RISK[region.id].red * 0.65).toFixed(4),
+      finalYellowChance: (CONFIG.chances.yellow * REGION_RISK[region.id].yellow).toFixed(4),
+      finalRedChance: (CONFIG.chances.red * REGION_RISK[region.id].red * 0.45).toFixed(4),
       currentState: states[region.id].status
     }));
   }
@@ -238,7 +263,7 @@ function simulateStates(slot) {
 function validateSimulationConfig() {
   const ids = new Set(REGIONS.map(region => region.id));
   for (const id of ids) {
-    if (!REGION_RISK[id] || !REGION_NEIGHBORS[id] || THREAT_DEPTH[id] === undefined) {
+    if (!REGION_RISK[id] || !REGION_NEIGHBORS[id] || NEIGHBOR_INFLUENCE_BY_ZONE[REGION_RISK[id].zone] === undefined) {
       throw new Error(`Incomplete simulation configuration for region ${id}`);
     }
     for (const neighborId of REGION_NEIGHBORS[id]) {
